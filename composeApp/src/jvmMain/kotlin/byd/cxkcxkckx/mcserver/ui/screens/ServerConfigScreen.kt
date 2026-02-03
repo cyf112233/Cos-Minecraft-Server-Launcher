@@ -3,6 +3,7 @@ package byd.cxkcxkckx.mcserver.ui.screens
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -20,8 +21,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import byd.cxkcxkckx.mcserver.data.ServerConfig
 import byd.cxkcxkckx.mcserver.data.ServerInfo
+import byd.cxkcxkckx.mcserver.data.PluginInfo
 import byd.cxkcxkckx.mcserver.utils.ConfigManager
 import byd.cxkcxkckx.mcserver.utils.JavaDetector
+import byd.cxkcxkckx.mcserver.utils.PluginManager
+import byd.cxkcxkckx.mcserver.utils.ServerRunner
 import byd.cxkcxkckx.mcserver.utils.JavaInstallation
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
@@ -769,52 +773,455 @@ fun PluginsContent(
     serverInfo: ServerInfo,
     onBack: () -> Unit
 ) {
+    var plugins by remember { mutableStateOf<List<PluginInfo>>(emptyList()) }
+    var isLoading by remember { mutableStateOf(true) }
+    var errorMessage by remember { mutableStateOf<String?>(null) }
+    var showDeleteDialog by remember { mutableStateOf(false) }
+    var showRenameDialog by remember { mutableStateOf(false) }
+    var selectedPlugin by remember { mutableStateOf<PluginInfo?>(null) }
+    var renameText by remember { mutableStateOf("") }
+    val scope = rememberCoroutineScope()
+    val isServerRunning = ServerRunner.isServerRunning(serverInfo.id)
+    
+    // 加载插件列表
+    fun loadPlugins() {
+        scope.launch {
+            isLoading = true
+            plugins = PluginManager.scanPlugins(serverInfo.path)
+            isLoading = false
+        }
+    }
+    
+    LaunchedEffect(Unit) {
+        loadPlugins()
+    }
+    
+    // 删除确认对话框
+    if (showDeleteDialog && selectedPlugin != null) {
+        AlertDialog(
+            onDismissRequest = { showDeleteDialog = false },
+            title = { Text("确认删除") },
+            text = { 
+                Text("确定要删除插件 \"${selectedPlugin!!.displayName}\" 吗？此操作不可撤销。")
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        scope.launch {
+                            val result = PluginManager.deletePlugin(selectedPlugin!!)
+                            result.onSuccess {
+                                showDeleteDialog = false
+                                selectedPlugin = null
+                                loadPlugins()
+                            }.onFailure { error ->
+                                errorMessage = "删除失败: ${error.message}"
+                                showDeleteDialog = false
+                            }
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error
+                    )
+                ) {
+                    Text("删除")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeleteDialog = false }) {
+                    Text("取消")
+                }
+            }
+        )
+    }
+    
+    // 重命名对话框
+    if (showRenameDialog && selectedPlugin != null) {
+        AlertDialog(
+            onDismissRequest = { showRenameDialog = false },
+            title = { Text("重命名插件") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("当前名称: ${selectedPlugin!!.displayName}")
+                    OutlinedTextField(
+                        value = renameText,
+                        onValueChange = { renameText = it },
+                        label = { Text("新名称") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        scope.launch {
+                            if (renameText.isNotBlank()) {
+                                val result = PluginManager.renamePlugin(selectedPlugin!!, renameText)
+                                result.onSuccess {
+                                    showRenameDialog = false
+                                    selectedPlugin = null
+                                    renameText = ""
+                                    loadPlugins()
+                                }.onFailure { error ->
+                                    errorMessage = "重命名失败: ${error.message}"
+                                }
+                            }
+                        }
+                    },
+                    enabled = renameText.isNotBlank()
+                ) {
+                    Text("确定")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { 
+                    showRenameDialog = false
+                    renameText = ""
+                }) {
+                    Text("取消")
+                }
+            }
+        )
+    }
+    
+    // 错误提示
+    errorMessage?.let { message ->
+        AlertDialog(
+            onDismissRequest = { errorMessage = null },
+            title = { Text("错误") },
+            text = { Text(message) },
+            confirmButton = {
+                Button(onClick = { errorMessage = null }) {
+                    Text("确定")
+                }
+            }
+        )
+    }
+    
     Column(
         modifier = Modifier
             .fillMaxSize()
             .padding(24.dp),
         verticalArrangement = Arrangement.spacedBy(20.dp)
     ) {
+        // 顶部工具栏
         Row(
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            IconButton(onClick = onBack) {
-                Icon(
-                    imageVector = Icons.Default.ArrowBack,
-                    contentDescription = "返回"
-                )
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconButton(onClick = onBack) {
+                    Icon(
+                        imageVector = Icons.Default.ArrowBack,
+                        contentDescription = "返回"
+                    )
+                }
+                Column {
+                    Text(
+                        text = "插件管理",
+                        fontSize = 24.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = "${plugins.size} 个插件",
+                        fontSize = 14.sp,
+                        color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.6f)
+                    )
+                }
             }
-            Text(
-                text = "插件列表",
-                fontSize = 24.sp,
-                fontWeight = FontWeight.Bold
-            )
+            
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                // 刷新按钮
+                IconButton(
+                    onClick = { loadPlugins() },
+                    modifier = Modifier.size(48.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Refresh,
+                        contentDescription = "刷新"
+                    )
+                }
+                
+                // 打开文件夹按钮
+                Button(
+                    onClick = {
+                        scope.launch {
+                            val result = PluginManager.openPluginsFolder(serverInfo.path)
+                            result.onFailure { error ->
+                                errorMessage = "打开文件夹失败: ${error.message}"
+                            }
+                        }
+                    },
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.FolderOpen,
+                        contentDescription = "打开文件夹",
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("打开文件夹")
+                }
+            }
         }
         
-        Box(
-            modifier = Modifier.fillMaxSize(),
-            contentAlignment = Alignment.Center
-        ) {
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(16.dp)
+        // 服务器运行状态提示
+        if (isServerRunning) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.errorContainer
+                ),
+                shape = RoundedCornerShape(12.dp)
             ) {
-                Icon(
-                    imageVector = Icons.Default.Extension,
-                    contentDescription = "插件",
-                    modifier = Modifier.size(64.dp),
-                    tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)
+                Row(
+                    modifier = Modifier.padding(16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Warning,
+                        contentDescription = "警告",
+                        tint = MaterialTheme.colorScheme.error
+                    )
+                    Column {
+                        Text(
+                            text = "服务器正在运行",
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onErrorContainer
+                        )
+                        Text(
+                            text = "请先停止服务器后再进行插件操作",
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.8f)
+                        )
+                    }
+                }
+            }
+        }
+        
+        // 插件列表
+        Card(
+            modifier = Modifier.fillMaxSize(),
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surfaceVariant
+            )
+        ) {
+            if (isLoading) {
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        CircularProgressIndicator()
+                        Text("正在加载插件列表...")
+                    }
+                }
+            } else if (plugins.isEmpty()) {
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(16.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Extension,
+                            contentDescription = "无插件",
+                            modifier = Modifier.size(64.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f)
+                        )
+                        Text(
+                            text = "暂无插件",
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            text = "请将插件文件放入 plugins 文件夹",
+                            fontSize = 14.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                        )
+                    }
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    items(plugins.size) { index ->
+                        PluginListItem(
+                            plugin = plugins[index],
+                            isServerRunning = isServerRunning,
+                            onToggleEnable = { plugin ->
+                                scope.launch {
+                                    val result = if (plugin.isEnabled) {
+                                        PluginManager.disablePlugin(plugin)
+                                    } else {
+                                        PluginManager.enablePlugin(plugin)
+                                    }
+                                    result.onSuccess {
+                                        loadPlugins()
+                                    }.onFailure { error ->
+                                        errorMessage = "操作失败: ${error.message}"
+                                    }
+                                }
+                            },
+                            onRename = { plugin ->
+                                selectedPlugin = plugin
+                                renameText = plugin.displayName
+                                showRenameDialog = true
+                            },
+                            onDelete = { plugin ->
+                                selectedPlugin = plugin
+                                showDeleteDialog = true
+                            }
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun PluginListItem(
+    plugin: PluginInfo,
+    isServerRunning: Boolean,
+    onToggleEnable: (PluginInfo) -> Unit,
+    onRename: (PluginInfo) -> Unit,
+    onDelete: (PluginInfo) -> Unit
+) {
+    var showMenu by remember { mutableStateOf(false) }
+    
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surface
+        ),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(
+                modifier = Modifier.weight(1f),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // 状态指示器
+                Box(
+                    modifier = Modifier
+                        .size(12.dp)
+                        .background(
+                            if (plugin.isEnabled)
+                                MaterialTheme.colorScheme.primary
+                            else
+                                MaterialTheme.colorScheme.outline,
+                            shape = androidx.compose.foundation.shape.CircleShape
+                        )
                 )
-                Text(
-                    text = "插件管理功能",
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.SemiBold
+                
+                Column {
+                    Text(
+                        text = plugin.displayName,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        text = if (plugin.isEnabled) "已启用" else "已禁用",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                    )
+                }
+            }
+            
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // 启用/禁用开关
+                Switch(
+                    checked = plugin.isEnabled,
+                    onCheckedChange = { onToggleEnable(plugin) },
+                    enabled = !isServerRunning
                 )
-                Text(
-                    text = "即将推出",
-                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.6f)
-                )
+                
+                // 更多操作菜单
+                Box {
+                    IconButton(
+                        onClick = { showMenu = true },
+                        enabled = !isServerRunning
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.MoreVert,
+                            contentDescription = "更多"
+                        )
+                    }
+                    
+                    DropdownMenu(
+                        expanded = showMenu,
+                        onDismissRequest = { showMenu = false }
+                    ) {
+                        DropdownMenuItem(
+                            text = { 
+                                Row(
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Edit,
+                                        contentDescription = "重命名",
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                    Text("重命名")
+                                }
+                            },
+                            onClick = {
+                                showMenu = false
+                                onRename(plugin)
+                            }
+                        )
+                        
+                        DropdownMenuItem(
+                            text = { 
+                                Row(
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Delete,
+                                        contentDescription = "删除",
+                                        modifier = Modifier.size(20.dp),
+                                        tint = MaterialTheme.colorScheme.error
+                                    )
+                                    Text(
+                                        "删除",
+                                        color = MaterialTheme.colorScheme.error
+                                    )
+                                }
+                            },
+                            onClick = {
+                                showMenu = false
+                                onDelete(plugin)
+                            }
+                        )
+                    }
+                }
             }
         }
     }

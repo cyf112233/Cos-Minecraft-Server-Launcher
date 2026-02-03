@@ -46,6 +46,39 @@ compose.desktop {
             targetFormats(TargetFormat.Dmg, TargetFormat.Msi, TargetFormat.Deb)
             packageName = "Cos Minecraft Server Launcher"
             packageVersion = "1.0.0"
+            
+            // Application description
+            description = "A modern Minecraft server launcher built with Compose Multiplatform"
+            copyright = "© 2026 Cos Minecraft Server Launcher"
+            vendor = "CMSL"
+            
+            // Windows specific configuration
+            windows {
+                // Create desktop shortcut
+                shortcut = true
+                // Create menu shortcut
+                menu = true
+                // Menu group name
+                menuGroup = "Cos Minecraft Server Launcher"
+                // Allow user to choose installation directory
+                dirChooser = true
+                // Install for all users
+                perUserInstall = false
+                // Unique identifier for upgrades
+                upgradeUuid = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            }
+            
+            // macOS specific configuration
+            macOS {
+                // Bundle identifier
+                bundleID = "byd.cxkcxkckx.mcserver"
+            }
+            
+            // Linux specific configuration
+            linux {
+                // Create desktop shortcut
+                shortcut = true
+            }
         }
     }
 }

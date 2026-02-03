@@ -2,6 +2,7 @@ package byd.cxkcxkckx.mcserver.utils
 
 import byd.cxkcxkckx.mcserver.data.ServerConfig
 import byd.cxkcxkckx.mcserver.data.ServerInfo
+import byd.cxkcxkckx.mcserver.data.ServerStats
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -11,6 +12,7 @@ import java.io.BufferedWriter
 import java.io.File
 import java.io.InputStreamReader
 import java.io.OutputStreamWriter
+import kotlin.concurrent.thread
 
 enum class ServerState {
     STOPPED,
@@ -26,7 +28,9 @@ data class ServerProcess(
     val outputReader: BufferedReader,
     val inputWriter: BufferedWriter,
     val state: MutableStateFlow<ServerState> = MutableStateFlow(ServerState.STARTING),
-    val logs: MutableStateFlow<List<String>> = MutableStateFlow(emptyList())
+    val logs: MutableStateFlow<List<String>> = MutableStateFlow(emptyList()),
+    val stats: MutableStateFlow<ServerStats> = MutableStateFlow(ServerStats()),
+    var startTime: Long = System.currentTimeMillis()
 )
 
 object ServerRunner {
@@ -136,7 +140,8 @@ object ServerRunner {
                 serverInfo = serverInfo,
                 process = process,
                 outputReader = outputReader,
-                inputWriter = inputWriter
+                inputWriter = inputWriter,
+                startTime = System.currentTimeMillis()
             )
             
             // Add to running list
@@ -148,6 +153,9 @@ object ServerRunner {
 
             // Start process monitor coroutine
             startProcessMonitor(serverProcess)
+            
+            // Start stats updater
+            startStatsUpdater(serverProcess)
 
             // Wait briefly to determine if the server actually starts or exits immediately
             log("Server startup initiated, waiting for confirmation...")
@@ -244,6 +252,56 @@ object ServerRunner {
     }
     
     /**
+     * Force kill server immediately
+     */
+    suspend fun forceKillServer(serverId: String): Boolean = withContext(Dispatchers.IO) {
+        log("Force killing server: $serverId")
+        val serverProcess = runningServers[serverId] ?: run {
+            log("Server not found in running list: $serverId")
+            return@withContext false
+        }
+        
+        try {
+            // Force kill process immediately
+            if (serverProcess.process.isAlive) {
+                log("Force terminating process")
+                serverProcess.process.destroyForcibly()
+                
+                // Wait up to 5 seconds for the process to die
+                var waited = 0
+                while (serverProcess.process.isAlive && waited < 10) {
+                    Thread.sleep(500)
+                    waited++
+                }
+                log("Process force killed")
+            }
+            
+            // Close streams
+            try {
+                serverProcess.outputReader.close()
+                serverProcess.inputWriter.close()
+                log("I/O streams closed")
+            } catch (e: Exception) {
+                log("Error closing streams: ${e.message}")
+            }
+            
+            // Remove from running list
+            runningServers.remove(serverId)
+            log("Server removed from running list")
+            
+            serverProcess.state.value = ServerState.STOPPED
+            log("Server state set to STOPPED")
+            
+            return@withContext true
+        } catch (e: Exception) {
+            log("Error force killing server: ${e.message}")
+            e.printStackTrace()
+            serverProcess.state.value = ServerState.ERROR
+            return@withContext false
+        }
+    }
+    
+    /**
      * Send command to server
      */
     suspend fun sendCommand(serverId: String, command: String): Boolean = withContext(Dispatchers.IO) {
@@ -285,6 +343,13 @@ object ServerRunner {
      */
     fun getServerLogs(serverId: String): StateFlow<List<String>>? {
         return runningServers[serverId]?.logs
+    }
+    
+    /**
+     * Get server stats
+     */
+    fun getServerStats(serverId: String): StateFlow<ServerStats>? {
+        return runningServers[serverId]?.stats
     }
     
     /**
@@ -366,6 +431,15 @@ object ServerRunner {
                                 log("Server state changed to RUNNING")
                             }
                         }
+                        
+                        // Parse player events
+                        parsePlayerEvents(line, serverProcess)
+                        
+                        // Parse TPS information
+                        parseTpsInfo(line, serverProcess)
+                        
+                        // Parse memory info
+                        parseMemoryInfo(line, serverProcess)
                     } else {
                         // End of stream
                         log("End of log stream reached")
@@ -382,6 +456,135 @@ object ServerRunner {
             name = "LogReader-${serverProcess.serverInfo.id}"
             isDaemon = true
         }.start()
+    }
+    
+    /**
+     * Parse player join/leave events from logs
+     */
+    private fun parsePlayerEvents(line: String, serverProcess: ServerProcess) {
+        try {
+            val lowerLine = line.lowercase()
+            
+            // Player joined
+            if (lowerLine.contains("joined the game") || lowerLine.contains("logged in")) {
+                val current = serverProcess.stats.value
+                serverProcess.stats.value = current.copy(
+                    onlinePlayers = (current.onlinePlayers + 1).coerceAtMost(current.maxPlayers)
+                )
+                log("Player joined, online: ${serverProcess.stats.value.onlinePlayers}")
+            }
+            
+            // Player left
+            if (lowerLine.contains("left the game") || lowerLine.contains("logged out") || 
+                lowerLine.contains("disconnected")) {
+                val current = serverProcess.stats.value
+                serverProcess.stats.value = current.copy(
+                    onlinePlayers = (current.onlinePlayers - 1).coerceAtLeast(0)
+                )
+                log("Player left, online: ${serverProcess.stats.value.onlinePlayers}")
+            }
+            
+            // Parse max players from server.properties loading message
+            // Example: "Max players: 20"
+            val maxPlayersMatch = Regex("max.*players.*[:\\s]+(\\d+)", RegexOption.IGNORE_CASE).find(line)
+            if (maxPlayersMatch != null) {
+                val maxPlayers = maxPlayersMatch.groupValues[1].toIntOrNull()
+                if (maxPlayers != null) {
+                    val current = serverProcess.stats.value
+                    serverProcess.stats.value = current.copy(maxPlayers = maxPlayers)
+                    log("Max players set to: $maxPlayers")
+                }
+            }
+        } catch (e: Exception) {
+            // Ignore parse errors
+        }
+    }
+    
+    /**
+     * Parse TPS information from logs
+     */
+    private fun parseTpsInfo(line: String, serverProcess: ServerProcess) {
+        try {
+            // TPS from /tps command or Paper's TPS message
+            // Example: "TPS from last 1m, 5m, 15m: 20.0, 20.0, 20.0"
+            // Example: "Current TPS = 20.0"
+            val tpsMatch = Regex("tps.*?([0-9]+\\.[0-9]+)", RegexOption.IGNORE_CASE).find(line)
+            if (tpsMatch != null) {
+                val tps = tpsMatch.groupValues[1].toDoubleOrNull()
+                if (tps != null && tps <= 20.0) {
+                    val current = serverProcess.stats.value
+                    serverProcess.stats.value = current.copy(tps = tps)
+                    log("TPS updated: $tps")
+                }
+            }
+        } catch (e: Exception) {
+            // Ignore parse errors
+        }
+    }
+    
+    /**
+     * Parse memory information from logs
+     */
+    private fun parseMemoryInfo(line: String, serverProcess: ServerProcess) {
+        try {
+            // Memory from various sources
+            // Example: "Memory: 512M/2048M"
+            // Example: "Used memory: 512 MB / Total: 2048 MB"
+            val memoryMatch = Regex("(\\d+)\\s*(?:m|mb).*?(\\d+)\\s*(?:m|mb|g|gb)", RegexOption.IGNORE_CASE).find(line)
+            if (memoryMatch != null) {
+                val used = memoryMatch.groupValues[1].toLongOrNull()
+                val total = memoryMatch.groupValues[2].toLongOrNull()
+                if (used != null && total != null) {
+                    val current = serverProcess.stats.value
+                    serverProcess.stats.value = current.copy(
+                        usedMemoryMB = used,
+                        maxMemoryMB = if (total > 100) total else total * 1024 // Convert GB to MB if needed
+                    )
+                    log("Memory updated: ${used}MB / ${total}MB")
+                }
+            }
+        } catch (e: Exception) {
+            // Ignore parse errors
+        }
+    }
+    
+    /**
+     * Start stats updater thread
+     */
+    private fun startStatsUpdater(serverProcess: ServerProcess) {
+        thread(name = "StatsUpdater-${serverProcess.serverInfo.id}", isDaemon = true) {
+            try {
+                while (serverProcess.process.isAlive) {
+                    // Update uptime every second
+                    val uptimeSeconds = (System.currentTimeMillis() - serverProcess.startTime) / 1000
+                    val current = serverProcess.stats.value
+                    serverProcess.stats.value = current.copy(uptimeSeconds = uptimeSeconds)
+                    
+                    // Get memory info from JVM
+                    try {
+                        val runtime = Runtime.getRuntime()
+                        val usedMemory = (runtime.totalMemory() - runtime.freeMemory()) / (1024 * 1024)
+                        val maxMemory = runtime.maxMemory() / (1024 * 1024)
+                        
+                        if (current.maxMemoryMB == 0L) {
+                            serverProcess.stats.value = current.copy(
+                                usedMemoryMB = usedMemory,
+                                maxMemoryMB = maxMemory,
+                                uptimeSeconds = uptimeSeconds
+                            )
+                        } else {
+                            serverProcess.stats.value = current.copy(uptimeSeconds = uptimeSeconds)
+                        }
+                    } catch (e: Exception) {
+                        // Ignore memory read errors
+                    }
+                    
+                    Thread.sleep(1000)
+                }
+            } catch (e: Exception) {
+                log("Error in stats updater: ${e.message}")
+            }
+        }
     }
     
     /**

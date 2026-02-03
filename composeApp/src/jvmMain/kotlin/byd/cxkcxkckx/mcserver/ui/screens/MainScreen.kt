@@ -373,30 +373,21 @@ fun ModernHomeScreen(
                                 }
                             }
                         },
+                        onForceKillClick = {
+                            scope.launch {
+                                selectedServer?.let { server ->
+                                    ServerRunner.forceKillServer(server.id)
+                                    onIsStarting(false)
+                                    onIsStopping(false)
+                                }
+                            }
+                        },
                         onStopClick = {
                             if (!isStopping && serverState == ServerState.RUNNING) {
                                 scope.launch {
                                     selectedServer?.let { server ->
                                         onIsStopping(true)
                                         ServerRunner.stopServer(server.id)
-                                    }
-                                }
-                            }
-                        },
-                        onRestartClick = {
-                            if (!isStopping && !isStarting && serverState == ServerState.RUNNING) {
-                                scope.launch {
-                                    selectedServer?.let { server ->
-                                        onIsStopping(true)
-                                        ServerRunner.stopServer(server.id)
-                                        kotlinx.coroutines.delay(2000)
-                                        onIsStopping(false)
-                                        onIsStarting(true)
-                                        val result = ServerRunner.startServer(server)
-                                        result.onFailure { error ->
-                                            onErrorMessage("重启失败: ${error.message}")
-                                            onIsStarting(false)
-                                        }
                                     }
                                 }
                             }
@@ -467,30 +458,21 @@ fun ModernHomeScreen(
                                     }
                                 }
                             },
+                            onForceKillClick = {
+                                scope.launch {
+                                    selectedServer?.let { server ->
+                                        ServerRunner.forceKillServer(server.id)
+                                        onIsStarting(false)
+                                        onIsStopping(false)
+                                    }
+                                }
+                            },
                             onStopClick = {
                                 if (!isStopping && serverState == ServerState.RUNNING) {
                                     scope.launch {
                                         selectedServer?.let { server ->
                                             onIsStopping(true)
                                             ServerRunner.stopServer(server.id)
-                                        }
-                                    }
-                                }
-                            },
-                            onRestartClick = {
-                                if (!isStopping && !isStarting && serverState == ServerState.RUNNING) {
-                                    scope.launch {
-                                        selectedServer?.let { server ->
-                                            onIsStopping(true)
-                                            ServerRunner.stopServer(server.id)
-                                            kotlinx.coroutines.delay(2000)
-                                            onIsStopping(false)
-                                            onIsStarting(true)
-                                            val result = ServerRunner.startServer(server)
-                                            result.onFailure { error ->
-                                                onErrorMessage("重启失败: ${error.message}")
-                                                onIsStarting(false)
-                                            }
                                         }
                                     }
                                 }
@@ -578,7 +560,7 @@ fun EulaDialog(
                 }
                 
                 Text(
-                    text = "点击<同意>按钮即表示您已阅读并同意 Minecraft EULA 的所有条款。",
+                    text = "点击【同意】按钮即表示您已阅读并同意 Minecraft EULA 的所有条款。",
                     fontSize = 13.sp,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
                 )
@@ -778,8 +760,8 @@ fun ModernServerControl(
     isStarting: Boolean,
     isStopping: Boolean,
     onStartClick: () -> Unit,
-    onStopClick: () -> Unit,
-    onRestartClick: () -> Unit
+    onForceKillClick: () -> Unit,
+    onStopClick: () -> Unit
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -863,6 +845,30 @@ fun ModernServerControl(
                                 fontSize = 15.sp,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
+                            
+                            // 强制关闭按钮
+                            Button(
+                                onClick = onForceKillClick,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(50.dp),
+                                shape = RoundedCornerShape(14.dp),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = MaterialTheme.colorScheme.error
+                                )
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Close,
+                                    contentDescription = "强制关闭",
+                                    modifier = Modifier.size(20.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    "强制关闭",
+                                    fontSize = 15.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
                         }
                     }
                     state == ServerState.STOPPED || state == ServerState.ERROR -> {
@@ -898,19 +904,25 @@ fun ModernServerControl(
                         Column(
                             verticalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
+                            // 强制关闭按钮
                             Button(
-                                onClick = onRestartClick,
-                                enabled = !stopping && !starting,
+                                onClick = onForceKillClick,
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .height(50.dp),
                                 shape = RoundedCornerShape(14.dp),
                                 colors = ButtonDefaults.buttonColors(
-                                    containerColor = MaterialTheme.colorScheme.tertiary
+                                    containerColor = MaterialTheme.colorScheme.error
                                 )
                             ) {
+                                Icon(
+                                    imageVector = Icons.Default.Close,
+                                    contentDescription = "强制关闭",
+                                    modifier = Modifier.size(20.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
                                 Text(
-                                    "重启服务器",
+                                    "强制关闭",
                                     fontSize = 15.sp,
                                     fontWeight = FontWeight.SemiBold
                                 )
@@ -924,20 +936,20 @@ fun ModernServerControl(
                                     .height(50.dp),
                                 shape = RoundedCornerShape(14.dp),
                                 colors = ButtonDefaults.buttonColors(
-                                    containerColor = MaterialTheme.colorScheme.error
+                                    containerColor = MaterialTheme.colorScheme.secondary
                                 )
                             ) {
                                 if (stopping) {
                                     CircularProgressIndicator(
                                         modifier = Modifier.size(20.dp),
-                                        color = MaterialTheme.colorScheme.onError,
+                                        color = MaterialTheme.colorScheme.onSecondary,
                                         strokeWidth = 2.dp
                                     )
                                     Spacer(modifier = Modifier.width(8.dp))
                                     Text("停止中...")
                                 } else {
                                     Text(
-                                        "停止服务器",
+                                        "正常关闭",
                                         fontSize = 15.sp,
                                         fontWeight = FontWeight.SemiBold
                                     )
@@ -963,6 +975,30 @@ fun ModernServerControl(
                                 fontSize = 15.sp,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
+                            
+                            // 强制关闭按钮
+                            Button(
+                                onClick = onForceKillClick,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(50.dp),
+                                shape = RoundedCornerShape(14.dp),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = MaterialTheme.colorScheme.error
+                                )
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Close,
+                                    contentDescription = "强制关闭",
+                                    modifier = Modifier.size(20.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    "强制关闭",
+                                    fontSize = 15.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
                         }
                     }
                 }
