@@ -41,6 +41,78 @@ fun MainScreen() {
     var selectedTab by remember { mutableStateOf(0) }
     val tabs = listOf("首页", "下载", "设置", "更多")
     
+    // Hoist all state to MainScreen level so it survives tab switches
+    var servers by remember { mutableStateOf<List<ServerInfo>>(emptyList()) }
+    var selectedServer by remember { mutableStateOf<ServerInfo?>(null) }
+    var showConfigScreen by remember { mutableStateOf(false) }
+    var showEulaDialog by remember { mutableStateOf(false) }
+    var errorMessage by remember { mutableStateOf<String?>(null) }
+    var isStarting by remember { mutableStateOf(false) }
+    var isStopping by remember { mutableStateOf(false) }
+    
+    // Hoist server state and logs to MainScreen
+    var serverState by remember { mutableStateOf(ServerState.STOPPED) }
+    var serverLogs by remember { mutableStateOf<List<String>>(emptyList()) }
+    
+    val scope = rememberCoroutineScope()
+    
+    // Subscribe to ServerRunner flows for the selected server
+    LaunchedEffect(selectedServer?.id) {
+        val serverId = selectedServer?.id
+        println("[MainScreen] LaunchedEffect for serverId=$serverId")
+        if (serverId != null) {
+            // Reset state when switching servers
+            serverState = ServerState.STOPPED
+            serverLogs = emptyList()
+            isStarting = false
+            isStopping = false
+            
+            val stateFlow = ServerRunner.getServerState(serverId)
+            val logsFlow = ServerRunner.getServerLogs(serverId)
+            
+            val stateJob = stateFlow?.let { flow ->
+                launch {
+                    println("[MainScreen] collecting state for $serverId")
+                    flow.collect { state ->
+                        println("[MainScreen] state update for $serverId -> $state")
+                        serverState = state
+                        if (state == ServerState.RUNNING) {
+                            isStarting = false
+                        }
+                        if (state == ServerState.STOPPED || state == ServerState.ERROR) {
+                            isStarting = false
+                            isStopping = false
+                        }
+                    }
+                }
+            }
+            
+            val logsJob = logsFlow?.let { flow ->
+                launch {
+                    println("[MainScreen] collecting logs for $serverId")
+                    flow.collect { logs ->
+                        println("[MainScreen] logs update for $serverId -> size=${logs.size}")
+                        serverLogs = logs
+                    }
+                }
+            }
+            
+            try {
+                kotlinx.coroutines.awaitCancellation()
+            } finally {
+                println("[MainScreen] Cancelling collectors for $serverId")
+                stateJob?.cancel()
+                logsJob?.cancel()
+            }
+        } else {
+            println("[MainScreen] no server selected, resetting state")
+            serverState = ServerState.STOPPED
+            serverLogs = emptyList()
+            isStarting = false
+            isStopping = false
+        }
+    }
+    
     Column(modifier = Modifier.fillMaxSize()) {
         Surface(
             modifier = Modifier.fillMaxWidth(),
@@ -101,7 +173,24 @@ fun MainScreen() {
                 }
             ) { tabIndex ->
                 when (tabIndex) {
-                    0 -> ModernHomeScreen()
+                    0 -> ModernHomeScreen(
+                        servers = servers,
+                        onServersChange = { servers = it },
+                        selectedServer = selectedServer,
+                        onServerSelected = { selectedServer = it },
+                        showConfigScreen = showConfigScreen,
+                        onShowConfigScreen = { showConfigScreen = it },
+                        showEulaDialog = showEulaDialog,
+                        onShowEulaDialog = { showEulaDialog = it },
+                        errorMessage = errorMessage,
+                        onErrorMessage = { errorMessage = it },
+                        isStarting = isStarting,
+                        onIsStarting = { isStarting = it },
+                        isStopping = isStopping,
+                        onIsStopping = { isStopping = it },
+                        serverState = serverState,
+                        serverLogs = serverLogs
+                    )
                     1 -> DownloadScreen()
                     2 -> SettingsScreen()
                     3 -> MoreScreen()
@@ -150,129 +239,77 @@ fun NavigationTab(
 }
 
 @Composable
-fun ModernHomeScreen() {
-    var servers by remember { mutableStateOf<List<ServerInfo>>(emptyList()) }
-    var selectedServer by remember { mutableStateOf<ServerInfo?>(null) }
-    var showConfigScreen by remember { mutableStateOf(false) }
-    var showEulaDialog by remember { mutableStateOf(false) }
-    var errorMessage by remember { mutableStateOf<String?>(null) }
-    var isStarting by remember { mutableStateOf(false) }
-    var isStopping by remember { mutableStateOf(false) }
+fun ModernHomeScreen(
+    servers: List<ServerInfo>,
+    onServersChange: (List<ServerInfo>) -> Unit,
+    selectedServer: ServerInfo?,
+    onServerSelected: (ServerInfo?) -> Unit,
+    showConfigScreen: Boolean,
+    onShowConfigScreen: (Boolean) -> Unit,
+    showEulaDialog: Boolean,
+    onShowEulaDialog: (Boolean) -> Unit,
+    errorMessage: String?,
+    onErrorMessage: (String?) -> Unit,
+    isStarting: Boolean,
+    onIsStarting: (Boolean) -> Unit,
+    isStopping: Boolean,
+    onIsStopping: (Boolean) -> Unit,
+    serverState: ServerState,
+    serverLogs: List<String>
+) {
     val scope = rememberCoroutineScope()
     
-    // 服务器状态和日志 - 根据选中的服务器实时切换
-    val serverState by produceState(ServerState.STOPPED, selectedServer?.id) {
-        val serverId = selectedServer?.id
-        println("[MainScreen] serverState produceState started for serverId=$serverId")
-        if (serverId != null) {
-            val stateFlow = ServerRunner.getServerState(serverId)
-            println("[MainScreen] getServerState returned: ${'$'}{stateFlow != null}")
-            stateFlow?.collect { state ->
-                println("[MainScreen] serverState collect for ${'$'}serverId -> ${'$'}state")
-                value = state
-                // 当状态变化时，重置加载状态
-                if (state == ServerState.RUNNING) {
-                    isStarting = false
-                }
-                if (state == ServerState.STOPPED || state == ServerState.ERROR) {
-                    isStarting = false
-                    isStopping = false
-                }
-            }
-        } else {
-            println("[MainScreen] serverId is null in serverState produceState")
-            value = ServerState.STOPPED
-            isStarting = false
-            isStopping = false
-        }
-    }
-
-    val serverLogs by produceState(emptyList<String>(), selectedServer?.id) {
-        val serverId = selectedServer?.id
-        println("[MainScreen] serverLogs produceState started for serverId=$serverId")
-        if (serverId != null) {
-            val logsFlow = ServerRunner.getServerLogs(serverId)
-            println("[MainScreen] getServerLogs returned: ${'$'}{logsFlow != null}")
-            logsFlow?.collect { logs ->
-                println("[MainScreen] serverLogs collect for ${'$'}serverId -> size=${'$'}{logs.size}")
-                value = logs
-            }
-        } else {
-            println("[MainScreen] serverId is null in serverLogs produceState")
-            value = emptyList()
-        }
-    }
-
-    // 监听服务器状态变化，自动重置UI状态
-    LaunchedEffect(serverState) {
-        when (serverState) {
-            ServerState.RUNNING -> {
-                isStarting = false
-            }
-            ServerState.STOPPED, ServerState.ERROR -> {
-                isStarting = false
-                isStopping = false
-            }
-            else -> {}
-        }
-    }
-
-    // 加载服务器列表
+    // Load servers
     fun loadServers() {
         scope.launch {
-            servers = ServerManager.scanServers()
-            selectedServer = selectedServer?.let { current ->
-                servers.find { it.id == current.id } ?: servers.firstOrNull()
-            } ?: servers.firstOrNull()
+            val newServers = ServerManager.scanServers()
+            onServersChange(newServers)
+            // Preserve or update selected server
+            onServerSelected(selectedServer?.let { current ->
+                newServers.find { it.id == current.id } ?: newServers.firstOrNull()
+            } ?: newServers.firstOrNull())
         }
     }
     
     LaunchedEffect(Unit) {
         loadServers()
     }
-
-    // 当选中服务器变化时，重置局部启动/停止标志，防止不同服务器之间状态污染
-    LaunchedEffect(selectedServer?.id) {
-        isStarting = false
-        isStopping = false
-    }
     
-    // EULA 对话框
+    // EULA dialog
     if (showEulaDialog && selectedServer != null) {
         EulaDialog(
             onAccept = {
                 scope.launch {
-                    isStarting = true
-                    val success = ServerRunner.acceptEula(selectedServer!!.path)
+                    onIsStarting(true)
+                    val success = ServerRunner.acceptEula(selectedServer.path)
                     if (success) {
-                        showEulaDialog = false
-                        // 启动服务器
-                        val result = ServerRunner.startServer(selectedServer!!)
+                        onShowEulaDialog(false)
+                        val result = ServerRunner.startServer(selectedServer)
                         result.onFailure { error ->
-                            errorMessage = "启动失败: ${error.message}"
-                            isStarting = false
+                            onErrorMessage("启动失败: ${error.message}")
+                            onIsStarting(false)
                         }
                     } else {
-                        errorMessage = "EULA 接受失败"
-                        isStarting = false
+                        onErrorMessage("EULA 接受失败")
+                        onIsStarting(false)
                     }
                 }
             },
             onDismiss = { 
-                showEulaDialog = false
-                isStarting = false
+                onShowEulaDialog(false)
+                onIsStarting(false)
             }
         )
     }
     
-    // 错误提示对话框
+    // Error dialog
     errorMessage?.let { message ->
         AlertDialog(
-            onDismissRequest = { errorMessage = null },
+            onDismissRequest = { onErrorMessage(null) },
             title = { Text("错误") },
             text = { Text(message) },
             confirmButton = {
-                Button(onClick = { errorMessage = null }) {
+                Button(onClick = { onErrorMessage(null) }) {
                     Text("确定")
                 }
             }
@@ -281,13 +318,12 @@ fun ModernHomeScreen() {
     
     if (showConfigScreen && selectedServer != null) {
         ServerConfigScreen(
-            serverInfo = selectedServer!!,
-            onBack = { showConfigScreen = false },
+            serverInfo = selectedServer,
+            onBack = { onShowConfigScreen(false) },
             onSave = { newConfig ->
-                selectedServer = selectedServer!!.copy(config = newConfig)
-                servers = servers.map {
-                    if (it.id == selectedServer!!.id) selectedServer!! else it
-                }
+                val updated = selectedServer.copy(config = newConfig)
+                onServerSelected(updated)
+                onServersChange(servers.map { if (it.id == updated.id) updated else it })
                 loadServers()
             }
         )
@@ -308,8 +344,8 @@ fun ModernHomeScreen() {
                     ServerSelector(
                         servers = servers,
                         selectedServer = selectedServer,
-                        onServerSelected = { selectedServer = it },
-                        onConfigClick = { showConfigScreen = true },
+                        onServerSelected = onServerSelected,
+                        onConfigClick = { onShowConfigScreen(true) },
                         onRefresh = { loadServers() }
                     )
                     
@@ -322,15 +358,15 @@ fun ModernHomeScreen() {
                             if (!isStarting && serverState == ServerState.STOPPED) {
                                 scope.launch {
                                     selectedServer?.let { server ->
-                                        isStarting = true
+                                        onIsStarting(true)
                                         val eulaAccepted = ServerRunner.checkEula(server.path)
                                         if (!eulaAccepted) {
-                                            showEulaDialog = true
+                                            onShowEulaDialog(true)
                                         } else {
                                             val result = ServerRunner.startServer(server)
                                             result.onFailure { error ->
-                                                errorMessage = "启动失败: ${error.message}"
-                                                isStarting = false
+                                                onErrorMessage("启动失败: ${error.message}")
+                                                onIsStarting(false)
                                             }
                                         }
                                     }
@@ -341,7 +377,7 @@ fun ModernHomeScreen() {
                             if (!isStopping && serverState == ServerState.RUNNING) {
                                 scope.launch {
                                     selectedServer?.let { server ->
-                                        isStopping = true
+                                        onIsStopping(true)
                                         ServerRunner.stopServer(server.id)
                                     }
                                 }
@@ -351,15 +387,15 @@ fun ModernHomeScreen() {
                             if (!isStopping && !isStarting && serverState == ServerState.RUNNING) {
                                 scope.launch {
                                     selectedServer?.let { server ->
-                                        isStopping = true
+                                        onIsStopping(true)
                                         ServerRunner.stopServer(server.id)
                                         kotlinx.coroutines.delay(2000)
-                                        isStopping = false
-                                        isStarting = true
+                                        onIsStopping(false)
+                                        onIsStarting(true)
                                         val result = ServerRunner.startServer(server)
                                         result.onFailure { error ->
-                                            errorMessage = "重启失败: ${error.message}"
-                                            isStarting = false
+                                            onErrorMessage("重启失败: ${error.message}")
+                                            onIsStarting(false)
                                         }
                                     }
                                 }
@@ -402,8 +438,8 @@ fun ModernHomeScreen() {
                         ServerSelector(
                             servers = servers,
                             selectedServer = selectedServer,
-                            onServerSelected = { selectedServer = it },
-                            onConfigClick = { showConfigScreen = true },
+                            onServerSelected = onServerSelected,
+                            onConfigClick = { onShowConfigScreen(true) },
                             onRefresh = { loadServers() }
                         )
                         
@@ -416,15 +452,15 @@ fun ModernHomeScreen() {
                                 if (!isStarting && serverState == ServerState.STOPPED) {
                                     scope.launch {
                                         selectedServer?.let { server ->
-                                            isStarting = true
+                                            onIsStarting(true)
                                             val eulaAccepted = ServerRunner.checkEula(server.path)
                                             if (!eulaAccepted) {
-                                                showEulaDialog = true
+                                                onShowEulaDialog(true)
                                             } else {
                                                 val result = ServerRunner.startServer(server)
                                                 result.onFailure { error ->
-                                                    errorMessage = "启动失败: ${error.message}"
-                                                    isStarting = false
+                                                    onErrorMessage("启动失败: ${error.message}")
+                                                    onIsStarting(false)
                                                 }
                                             }
                                         }
@@ -435,7 +471,7 @@ fun ModernHomeScreen() {
                                 if (!isStopping && serverState == ServerState.RUNNING) {
                                     scope.launch {
                                         selectedServer?.let { server ->
-                                            isStopping = true
+                                            onIsStopping(true)
                                             ServerRunner.stopServer(server.id)
                                         }
                                     }
@@ -445,15 +481,15 @@ fun ModernHomeScreen() {
                                 if (!isStopping && !isStarting && serverState == ServerState.RUNNING) {
                                     scope.launch {
                                         selectedServer?.let { server ->
-                                            isStopping = true
+                                            onIsStopping(true)
                                             ServerRunner.stopServer(server.id)
                                             kotlinx.coroutines.delay(2000)
-                                            isStopping = false
-                                            isStarting = true
+                                            onIsStopping(false)
+                                            onIsStarting(true)
                                             val result = ServerRunner.startServer(server)
                                             result.onFailure { error ->
-                                                errorMessage = "重启失败: ${error.message}"
-                                                isStarting = false
+                                                onErrorMessage("重启失败: ${error.message}")
+                                                onIsStarting(false)
                                             }
                                         }
                                     }
@@ -571,7 +607,7 @@ fun EulaDialog(
 fun ServerSelector(
     servers: List<ServerInfo>,
     selectedServer: ServerInfo?,
-    onServerSelected: (ServerInfo) -> Unit,
+    onServerSelected: (ServerInfo?) -> Unit,
     onConfigClick: () -> Unit,
     onRefresh: () -> Unit
 ) {
@@ -600,7 +636,6 @@ fun ServerSelector(
                 
                 IconButton(
                     onClick = {
-                        // Debug log for refresh action
                         println("[MainScreen] Refresh servers requested")
                         onRefresh()
                     },
@@ -630,13 +665,11 @@ fun ServerSelector(
                             isSelected = server == selectedServer,
                             isRunning = ServerRunner.isServerRunning(server.id),
                             onClick = {
-                                // Debug log for server selection
-                                println("[MainScreen] Server selected: ${'$'}{server.name} (${ '$'}{server.id})")
+                                println("[MainScreen] Server selected: ${server.name} (${server.id})")
                                 onServerSelected(server)
                             },
                             onConfigClick = {
-                                // Debug log for opening config for a server
-                                println("[MainScreen] Open config for: ${'$'}{server.name} (${ '$'}{server.id})")
+                                println("[MainScreen] Open config for: ${server.name} (${server.id})")
                                 onServerSelected(server)
                                 onConfigClick()
                             }
@@ -677,7 +710,6 @@ fun ServerListItem(
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
                 modifier = Modifier.weight(1f)
             ) {
-                // 运行状态指示器
                 Box(
                     modifier = Modifier
                         .size(8.dp)
@@ -1165,12 +1197,10 @@ fun ModernConsolePanel(
                         state = listState,
                         verticalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
-                        // Use itemsIndexed and index as key to guarantee uniqueness even when log text repeats
                         itemsIndexed(
                             items = logs,
                             key = { index, _ -> index }
                         ) { _, log ->
-                            // 解析颜色代码并显示
                             val coloredParts = remember(log) { AnsiColorParser.parse(log) }
 
                             Text(
@@ -1200,7 +1230,6 @@ fun ModernConsolePanel(
                 }
             }
             
-            // 命令输入框
             HorizontalDivider(
                 modifier = Modifier.padding(horizontal = 16.dp),
                 color = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f)

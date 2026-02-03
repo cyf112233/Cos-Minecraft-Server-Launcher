@@ -60,6 +60,7 @@ object ServerManager {
         val config = ConfigManager.loadConfig(folder.absolutePath)
         
         return ServerInfo(
+            id = folder.absolutePath,
             name = name,
             path = folder.absolutePath,
             version = version,
