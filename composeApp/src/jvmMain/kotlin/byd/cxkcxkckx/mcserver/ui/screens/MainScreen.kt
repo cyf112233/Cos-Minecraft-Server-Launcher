@@ -163,38 +163,24 @@ fun ModernHomeScreen() {
     // 服务器状态和日志 - 根据选中的服务器实时切换
     val serverState by produceState(ServerState.STOPPED, selectedServer?.id) {
         val serverId = selectedServer?.id
-        println("[MainScreen] produceState(serverState) started for: $serverId")
+        println("[MainScreen] serverState produceState started for serverId=$serverId")
         if (serverId != null) {
-            // Wait for ServerRunner to expose a StateFlow for this server (it may be started later)
-            while (true) {
-                val flow = ServerRunner.getServerState(serverId)
-                if (flow != null) {
-                    // Collect actual state updates
-                    flow.collect { state ->
-                        println("[MainScreen] server state emitted: $state for $serverId")
-                        value = state
-                        if (state == ServerState.RUNNING) {
-                            isStarting = false
-                        }
-                        if (state == ServerState.STOPPED || state == ServerState.ERROR) {
-                            isStarting = false
-                            isStopping = false
-                        }
-                    }
-                    // If collect returns (flow completed), break and retry waiting
-                } else {
-                    // No flow yet; show STOPPED and poll until available or cancelled
-                    println("[MainScreen] no state flow for $serverId yet, polling...")
-                    value = ServerState.STOPPED
+            val stateFlow = ServerRunner.getServerState(serverId)
+            println("[MainScreen] getServerState returned: ${'$'}{stateFlow != null}")
+            stateFlow?.collect { state ->
+                println("[MainScreen] serverState collect for ${'$'}serverId -> ${'$'}state")
+                value = state
+                // 当状态变化时，重置加载状态
+                if (state == ServerState.RUNNING) {
+                    isStarting = false
+                }
+                if (state == ServerState.STOPPED || state == ServerState.ERROR) {
                     isStarting = false
                     isStopping = false
-                    kotlinx.coroutines.delay(500)
-                    continue
                 }
-                // If we reach here, either flow.collect ended; loop to re-check
             }
         } else {
-            println("[MainScreen] no server selected for serverState produceState; setting STOPPED")
+            println("[MainScreen] serverId is null in serverState produceState")
             value = ServerState.STOPPED
             isStarting = false
             isStopping = false
@@ -203,32 +189,22 @@ fun ModernHomeScreen() {
 
     val serverLogs by produceState(emptyList<String>(), selectedServer?.id) {
         val serverId = selectedServer?.id
-        println("[MainScreen] produceState(serverLogs) started for: $serverId")
+        println("[MainScreen] serverLogs produceState started for serverId=$serverId")
         if (serverId != null) {
-            // Wait for logs flow to appear (server might be started after selection)
-            while (true) {
-                val flow = ServerRunner.getServerLogs(serverId)
-                if (flow != null) {
-                    flow.collect { logs ->
-                        println("[MainScreen] server logs emitted: ${'$'}{logs.size} lines for $serverId; latest='${'$'}{logs.takeLast(1).firstOrNull() ?: ""}'")
-                        value = logs
-                    }
-                } else {
-                    println("[MainScreen] no logs flow for $serverId yet, polling...")
-                    value = emptyList()
-                    kotlinx.coroutines.delay(500)
-                    continue
-                }
+            val logsFlow = ServerRunner.getServerLogs(serverId)
+            println("[MainScreen] getServerLogs returned: ${'$'}{logsFlow != null}")
+            logsFlow?.collect { logs ->
+                println("[MainScreen] serverLogs collect for ${'$'}serverId -> size=${'$'}{logs.size}")
+                value = logs
             }
         } else {
-            println("[MainScreen] no server selected for serverLogs produceState; setting empty list")
+            println("[MainScreen] serverId is null in serverLogs produceState")
             value = emptyList()
         }
     }
 
     // 监听服务器状态变化，自动重置UI状态
     LaunchedEffect(serverState) {
-        println("[MainScreen] LaunchedEffect(serverState) triggered: $serverState for selected=${'$'}{selectedServer?.id}")
         when (serverState) {
             ServerState.RUNNING -> {
                 isStarting = false
@@ -653,14 +629,14 @@ fun ServerSelector(
                             server = server,
                             isSelected = server == selectedServer,
                             isRunning = ServerRunner.isServerRunning(server.id),
-                                onClick = {
+                            onClick = {
                                 // Debug log for server selection
-                                println("[MainScreen] Server selected: " + server.name + " (" + server.id + ")")
+                                println("[MainScreen] Server selected: ${'$'}{server.name} (${ '$'}{server.id})")
                                 onServerSelected(server)
                             },
                             onConfigClick = {
                                 // Debug log for opening config for a server
-                                println("[MainScreen] Open config for: " + server.name + " (" + server.id + ")")
+                                println("[MainScreen] Open config for: ${'$'}{server.name} (${ '$'}{server.id})")
                                 onServerSelected(server)
                                 onConfigClick()
                             }
