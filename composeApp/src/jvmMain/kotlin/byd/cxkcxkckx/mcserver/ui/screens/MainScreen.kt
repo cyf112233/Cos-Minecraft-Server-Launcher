@@ -3,6 +3,7 @@ package byd.cxkcxkckx.mcserver.ui.screens
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -29,21 +30,93 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.Image
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.gestures.detectTapGestures
 import byd.cxkcxkckx.mcserver.data.ServerInfo
 import byd.cxkcxkckx.mcserver.data.ServerStats
+import byd.cxkcxkckx.mcserver.data.DownloadTask
+import byd.cxkcxkckx.mcserver.data.DownloadStatus
 import byd.cxkcxkckx.mcserver.utils.AnsiColorParser
 import byd.cxkcxkckx.mcserver.utils.ServerManager
 import byd.cxkcxkckx.mcserver.utils.ServerRunner
 import byd.cxkcxkckx.mcserver.utils.ServerState
+import byd.cxkcxkckx.mcserver.utils.ServerStateManager
+import byd.cxkcxkckx.mcserver.utils.DownloadManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.awt.image.BufferedImage
+import java.net.URL
+import javax.imageio.ImageIO
+import org.jetbrains.skia.Image as SkiaImage
+
+// Image loader with caching
+object IconLoader {
+    private val cache = mutableMapOf<String, ImageBitmap?>()
+    
+    suspend fun load(url: String?): ImageBitmap? = withContext(Dispatchers.IO) {
+        if (url.isNullOrBlank()) return@withContext null
+        
+        // Check cache first
+        cache[url]?.let { return@withContext it }
+        
+        try {
+            val connection = URL(url).openConnection()
+            connection.connectTimeout = 5000
+            connection.readTimeout = 5000
+            val bufferedImage = ImageIO.read(connection.getInputStream())
+            
+            if (bufferedImage != null) {
+                val bitmap = bufferedImageToImageBitmap(bufferedImage)
+                cache[url] = bitmap
+                bitmap
+            } else {
+                cache[url] = null
+                null
+            }
+        } catch (e: Exception) {
+            println("Failed to load icon from $url: ${e.message}")
+            cache[url] = null
+            null
+        }
+    }
+    
+    private fun bufferedImageToImageBitmap(bufferedImage: BufferedImage): ImageBitmap {
+        val width = bufferedImage.width
+        val height = bufferedImage.height
+        val pixels = IntArray(width * height)
+        bufferedImage.getRGB(0, 0, width, height, pixels, 0, width)
+        
+        // Convert Int ARGB pixels -> ByteArray RGBA expected by Skia
+        val bytes = ByteArray(width * height * 4)
+        for (i in pixels.indices) {
+            val pixel = pixels[i]
+            // pixel is ARGB (alpha in high byte)
+            bytes[i * 4] = ((pixel shr 16) and 0xFF).toByte()     // R
+            bytes[i * 4 + 1] = ((pixel shr 8) and 0xFF).toByte()  // G
+            bytes[i * 4 + 2] = (pixel and 0xFF).toByte()          // B
+            bytes[i * 4 + 3] = ((pixel shr 24) and 0xFF).toByte() // A
+        }
+
+        val skiaImage = SkiaImage.makeRaster(
+            imageInfo = org.jetbrains.skia.ImageInfo.makeS32(width, height, org.jetbrains.skia.ColorAlphaType.UNPREMUL),
+            bytes = bytes,
+            rowBytes = width * 4
+        )
+
+        return skiaImage.asImageBitmap()
+    }
+}
 
 @Composable
 fun MainScreen() {
+    
     var selectedTab by remember { mutableStateOf(0) }
-    val tabs = listOf("首页", "下载", "设置", "更多")
+    val tabs = listOf("首页", "下载", "市场", "更多")
     
     // Hoist all state to MainScreen level so it survives tab switches
     var servers by remember { mutableStateOf<List<ServerInfo>>(emptyList()) }
@@ -54,185 +127,71 @@ fun MainScreen() {
     var isStarting by remember { mutableStateOf(false) }
     var isStopping by remember { mutableStateOf(false) }
     
-    // Hoist server state, stats and logs to MainScreen
-    var serverState by remember { mutableStateOf(ServerState.STOPPED) }
-    var serverLogs by remember { mutableStateOf<List<String>>(emptyList()) }
-    var serverStats by remember { mutableStateOf(ServerStats()) }
-    // 服务器列表状态刷新触发器
+    // Use centralized state manager for all server states
+    val allServerStates by ServerStateManager.serverStates.collectAsState()
+    
+    // Derive state for selected server
+    val selectedServerState by remember {
+        derivedStateOf {
+            selectedServer?.id?.let { allServerStates[it] }
+        }
+    }
+    
     var serverListRefreshTrigger by remember { mutableStateOf(0) }
-    // 记录上一次巡检到的服务器状态，用于检测是否从 STARTING/STOPPING 跳出
-    var prevServerStates by remember { mutableStateOf<Map<String, ServerState>>(emptyMap()) }
-    // 记录上一次是否处于过渡状态（用于边沿检测）
-    var prevHasTransitioning by remember { mutableStateOf(false) }
     
     val scope = rememberCoroutineScope()
     
-    // Subscribe to ServerRunner flows for the selected server
-    LaunchedEffect(selectedServer?.id) {
-        val serverId = selectedServer?.id
-        println("[MainScreen] LaunchedEffect for serverId=$serverId")
-        // 切换服务器时触发一次列表刷新，确保状态/日志在 UI 中同步更新
-        serverListRefreshTrigger++
-            if (serverId != null) {
-            // Reset state when switching servers
-            serverState = ServerState.STOPPED
-            serverLogs = emptyList()
-                serverStats = ServerStats()
-            isStarting = false
-            isStopping = false
-            
-            val stateFlow = ServerRunner.getServerState(serverId)
-            val logsFlow = ServerRunner.getServerLogs(serverId)
-            
-            // track previous state so we can detect transitions (e.g. STARTING -> RUNNING)
-            var prevState: ServerState? = null
-
-            val stateJob = stateFlow?.let { flow ->
-                launch {
-                    println("[MainScreen] collecting state for $serverId")
-                    flow.collect { state ->
-                        println("[MainScreen] state update for $serverId -> $state")
-                        // 如果从 STARTING 变为 RUNNING：不要立即刷新，改为延迟 3 秒后刷新，
-                        // 以避免瞬时状态波动导致 UI 频繁变化（用户要求的“跳出自动刷新”延迟行为）。
-                        if (prevState == ServerState.STARTING && state == ServerState.RUNNING) {
-                            println("[MainScreen] Detected STARTING -> RUNNING for $serverId, scheduling delayed (3s) list refresh")
-                            launch {
-                                delay(3000)
-                                println("[MainScreen] Delayed (3s) refresh for $serverId")
-                                serverListRefreshTrigger++
-                            }
-                        }
-                        serverState = state
-                        prevState = state
-                        if (state == ServerState.RUNNING) {
-                            isStarting = false
-                        }
-                        if (state == ServerState.STOPPED || state == ServerState.ERROR) {
-                            isStarting = false
-                            isStopping = false
-                        }
-                    }
-                }
+    // Track transitioning state for UI flags
+    LaunchedEffect(selectedServer?.id, selectedServerState) {
+        val state = selectedServerState?.state ?: ServerState.STOPPED
+        when (state) {
+            ServerState.STARTING -> {
+                isStarting = true
+                isStopping = false
             }
-            
-            val logsJob = logsFlow?.let { flow ->
-                launch {
-                    println("[MainScreen] collecting logs for $serverId")
-                    flow.collect { logs ->
-                        println("[MainScreen] logs update for $serverId -> size=${logs.size}")
-                        serverLogs = logs
-                    }
-                }
+            ServerState.STOPPING -> {
+                isStarting = false
+                isStopping = true
             }
-
-            val statsJob = ServerRunner.getServerStats(serverId)?.let { flow ->
-                launch {
-                    println("[MainScreen] collecting stats for $serverId")
-                    flow.collect { stats ->
-                        println("[MainScreen] stats update for $serverId -> tps=${stats.tps} players=${stats.onlinePlayers}")
-                        serverStats = stats
-                    }
-                }
+            ServerState.RUNNING -> {
+                isStarting = false
+                isStopping = false
             }
-            
-            try {
-                kotlinx.coroutines.awaitCancellation()
-            } finally {
-                println("[MainScreen] Cancelling collectors for $serverId")
-                stateJob?.cancel()
-                logsJob?.cancel()
-                statsJob?.cancel()
+            ServerState.STOPPED, ServerState.ERROR -> {
+                isStarting = false
+                isStopping = false
             }
-        } else {
-            println("[MainScreen] no server selected, resetting state")
-            serverState = ServerState.STOPPED
-            serverLogs = emptyList()
-            isStarting = false
-            isStopping = false
         }
     }
 
-    // 定期检查服务器状态：每10秒巡检一次
-    // 逻辑：
-    // - 如果当前巡检检测到有服务器处于过渡状态（STARTING/STOPPING），则每次巡检都触发刷新
-    // - 如果当前为非过渡状态但上次为过渡状态（离开过渡），则触发一次刷新并更新选中服务器信息
-    // - 否则不触发额外刷新
-    LaunchedEffect(servers) {
+    // Unified periodic refresh - check every 5 seconds
+    LaunchedEffect(Unit) {
         while (true) {
-            delay(10000) // 每10秒检查一次
-
-            // 检查当前是否有服务器处于过渡状态
-            val hasTransitioning = servers.any { server ->
-                val state = ServerRunner.getServerState(server.id)?.value
-                state == ServerState.STARTING || state == ServerState.STOPPING
-            }
-
+            delay(5000)
+            
+            // Check if any server is transitioning
+            val hasTransitioning = allServerStates.values.any { it.isTransitioning }
+            
             if (hasTransitioning) {
-                // 如果当前有处于过渡的服务器，每次巡检都刷新
-                println("[MainScreen] 检测到过渡状态的服务器，触发服务器列表刷新")
+                println("[MainScreen] Transitioning servers detected, refreshing server list")
                 serverListRefreshTrigger++
-            } else if (!hasTransitioning && prevHasTransitioning) {
-                // 刚刚从过渡状态离开：先触发一次立即刷新，10 秒后再触发一次以确保状态稳定
-                println("[MainScreen] 检测到离开过渡状态，触发一次立即刷新并在10秒后再次刷新以稳定更新")
-                serverListRefreshTrigger++
-                // 在后台计划一次延迟刷新（而不是立即双触发）
-                launch {
-                    delay(10000)
-                    println("[MainScreen] 延迟刷新（10s）触发")
-                    serverListRefreshTrigger++
-                }
-                selectedServer?.let { sel ->
-                    val s = ServerRunner.getServerState(sel.id)?.value
-                    if (s != null) {
-                        println("[MainScreen] 刷新选中服务器状态: ${sel.id} -> $s")
-                        serverState = s
-                    }
-                    val l = ServerRunner.getServerLogs(sel.id)?.value
-                    if (l != null) {
-                        println("[MainScreen] 刷新选中服务器日志: ${sel.id} -> size=${l.size}")
-                        serverLogs = l
-                    }
-                }
             }
-
-            // 更新历史标志和 prevServerStates（保留历史）
-            prevHasTransitioning = hasTransitioning
-            prevServerStates = servers.associate { server ->
-                server.id to (ServerRunner.getServerState(server.id)?.value ?: ServerState.STOPPED)
-            }
-            // 继续循环；LaunchedEffect 在 servers 发生变化时会重启
         }
     }
 
-    // 响应外部或手动触发的刷新（serverListRefreshTrigger）
-    // 刷新时同时更新：服务器列表、选中服务器状态、选中服务器日志
+    // Respond to manual refresh triggers
     LaunchedEffect(serverListRefreshTrigger) {
         println("[MainScreen] Refresh trigger fired: $serverListRefreshTrigger")
         scope.launch {
             try {
-                // 重新扫描服务器列表
                 val newServers = ServerManager.scanServers()
                 println("[MainScreen] Scanned servers: size=${newServers.size}")
                 servers = newServers
 
-                // 刷新选中服务器的状态与日志（如果存在）
-                selectedServer?.let { sel ->
-                    val s = ServerRunner.getServerState(sel.id)?.value
-                    if (s != null) {
-                        println("[MainScreen] Refreshed selected server state: ${sel.id} -> $s")
-                        serverState = s
-                    }
-                    val l = ServerRunner.getServerLogs(sel.id)?.value
-                    if (l != null) {
-                        println("[MainScreen] Refreshed selected server logs: ${sel.id} -> size=${l.size}")
-                        serverLogs = l
-                    }
-                    val stats = ServerRunner.getServerStats(sel.id)?.value
-                    if (stats != null) {
-                        println("[MainScreen] Refreshed selected server stats: ${sel.id} -> tps=${stats.tps}")
-                        serverStats = stats
-                    }
-                }
+                // Preserve or update selected server
+                selectedServer = selectedServer?.let { current ->
+                    newServers.find { it.id == current.id } ?: newServers.firstOrNull()
+                } ?: newServers.firstOrNull()
             } catch (e: Exception) {
                 println("[MainScreen] Error during refresh: ${e.message}")
             }
@@ -315,54 +274,739 @@ fun MainScreen() {
                         onIsStarting = { isStarting = it },
                         isStopping = isStopping,
                         onIsStopping = { isStopping = it },
-                        serverStats = serverStats,
-                    serverState = serverState,
-                    serverLogs = serverLogs,
-                    // 手动刷新现在会立即触发一次 refresh trigger，以保证 LaunchedEffect(serverListRefreshTrigger) 立刻响应。
-                    // 同时在后台进行一次 IO 扫描并把结果写回 servers（以便用户尽快看到列表变化）。
-                    onManualRefresh = {
-                        // 立即触发一次 refresh（同步修改），保证所有依赖该 trigger 的副作用被唤醒
-                        println("[MainScreen] onManualRefresh invoked - incrementing serverListRefreshTrigger")
-                        serverListRefreshTrigger++
-
-                        // 立刻刷新选中服务器的状态与日志（同步读取 StateFlow 的当前值），
-                        // 以避免 UI 在后台扫描完成前仍显示过时的启动/停止标志。
-                        selectedServer?.let { sel ->
-                            val s = ServerRunner.getServerState(sel.id)?.value
-                            if (s != null) {
-                                println("[MainScreen] onManualRefresh: selected server state -> $s")
-                                serverState = s
-                                // 保持 isStarting/isStopping 与实际 state 同步
-                                isStarting = (s == ServerState.STARTING)
-                                isStopping = (s == ServerState.STOPPING)
-                            }
-                            val l = ServerRunner.getServerLogs(sel.id)?.value
-                            if (l != null) {
-                                println("[MainScreen] onManualRefresh: selected server logs size=${l.size}")
-                                serverLogs = l
-                            }
-                        }
-
-                        // 异步执行扫描并更新 servers（不再在完成时再改动 trigger）
-                        scope.launch {
-                            try {
-                                val newServers = withContext(Dispatchers.IO) { ServerManager.scanServers() }
-                                println("[MainScreen] Manual refresh scanned servers: size=${newServers.size}")
-                                servers = newServers
-                                // 保持或更新选中服务器
-                                selectedServer = selectedServer?.let { current ->
-                                    newServers.find { it.id == current.id } ?: newServers.firstOrNull()
-                                } ?: newServers.firstOrNull()
-                            } catch (e: Exception) {
-                                println("[MainScreen] Error during manual refresh: ${e.message}")
-                            }
-                        }
-                    },
+                        serverStateInfo = selectedServerState,
+                        onManualRefresh = {
+                            println("[MainScreen] onManualRefresh invoked")
+                            serverListRefreshTrigger++
+                        },
                         serverListRefreshTrigger = serverListRefreshTrigger
                     )
                     1 -> DownloadScreen()
-                    2 -> SettingsScreen()
+                    2 -> MarketScreen(
+                        servers = servers,
+                        selectedServer = selectedServer,
+                        onManualRefresh = { serverListRefreshTrigger++ }
+                    )
                     3 -> MoreScreen()
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun MarketScreen(
+    servers: List<byd.cxkcxkckx.mcserver.data.ServerInfo>,
+    selectedServer: byd.cxkcxkckx.mcserver.data.ServerInfo?,
+    onManualRefresh: () -> Unit
+) {
+    val scope = rememberCoroutineScope()
+    var query by remember { mutableStateOf("") }
+    var displayedProjects by remember { mutableStateOf<List<byd.cxkcxkckx.mcserver.api.ModrinthAPI.ModrinthProject>>(emptyList()) }
+    var loading by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    var selectedProject by remember { mutableStateOf<byd.cxkcxkckx.mcserver.api.ModrinthAPI.ModrinthProject?>(null) }
+    var selectedProjectVersions by remember { mutableStateOf<List<byd.cxkcxkckx.mcserver.api.ModrinthAPI.VersionInfo>>(emptyList()) }
+    var hasSearched by remember { mutableStateOf(false) }
+    var offset by remember { mutableStateOf(0) }
+    var canLoadMore by remember { mutableStateOf(true) }
+    var showDownloadsDialog by remember { mutableStateOf(false) }
+    
+    // 下载任务状态（从 DownloadManager 获取）- 使用 tasks 而不是 downloadTasks
+    val downloadTasks by DownloadManager.tasks.collectAsState()
+
+    // Load recommended on first composition
+    LaunchedEffect(Unit) {
+        if (displayedProjects.isEmpty()) {
+            scope.launch {
+                try {
+                    loading = true
+                    val res = byd.cxkcxkckx.mcserver.api.ModrinthAPI.searchProjects("minecraft", offset = 0)
+                    displayedProjects = res.getOrElse { emptyList() }
+                    offset = displayedProjects.size
+                    canLoadMore = displayedProjects.size >= 20
+                } catch (e: Exception) {
+                    error = e.message
+                } finally {
+                    loading = false
+                }
+            }
+        }
+    }
+
+    fun loadMore() {
+        if (!loading && canLoadMore) {
+            scope.launch {
+                try {
+                    loading = true
+                    val searchQuery = if (hasSearched && query.isNotBlank()) query else "minecraft"
+                    val res = byd.cxkcxkckx.mcserver.api.ModrinthAPI.searchProjects(searchQuery, offset = offset)
+                    val newProjects = res.getOrElse { emptyList() }
+                    if (newProjects.isNotEmpty()) {
+                        displayedProjects = displayedProjects + newProjects
+                        offset += newProjects.size
+                        canLoadMore = newProjects.size >= 20
+                    } else {
+                        canLoadMore = false
+                    }
+                } catch (e: Exception) {
+                    error = e.message
+                } finally {
+                    loading = false
+                }
+            }
+        }
+    }
+
+    // 下载任务弹窗
+    if (showDownloadsDialog) {
+        AlertDialog(
+            onDismissRequest = { showDownloadsDialog = false },
+            title = { Text("下载任务", fontWeight = FontWeight.Bold) },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 400.dp)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    if (downloadTasks.isEmpty()) {
+                        Text(
+                            "暂无下载任务",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(16.dp)
+                        )
+                    } else {
+                        downloadTasks.forEach { task ->
+                            Card(
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = CardDefaults.cardColors(
+                                    containerColor = MaterialTheme.colorScheme.surfaceVariant
+                                )
+                            ) {
+                                Column(modifier = Modifier.padding(12.dp)) {
+                                    Text(
+                                        task.fileName,
+                                        fontWeight = FontWeight.SemiBold,
+                                        fontSize = 14.sp
+                                    )
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    
+                                    LinearProgressIndicator(
+                                        progress = { task.progress },
+                                        modifier = Modifier.fillMaxWidth(),
+                                    )
+                                    
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Text(
+                                            "${(task.progress * 100).toInt()}%",
+                                            fontSize = 12.sp,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                        Text(
+                                            text = when (task.status) {
+                                                DownloadStatus.PENDING -> "等待中"
+                                                DownloadStatus.DOWNLOADING -> "下载中"
+                                                DownloadStatus.COMPLETED -> "已完成"
+                                                DownloadStatus.FAILED -> "失败"
+                                                DownloadStatus.CANCELLED -> "已取消"
+                                            },
+                                            fontSize = 12.sp,
+                                            color = when (task.status) {
+                                                DownloadStatus.COMPLETED -> MaterialTheme.colorScheme.primary
+                                                DownloadStatus.FAILED -> MaterialTheme.colorScheme.error
+                                                else -> MaterialTheme.colorScheme.onSurfaceVariant
+                                            }
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showDownloadsDialog = false }) {
+                    Text("关闭")
+                }
+            }
+        )
+    }
+
+    // Show details panel if a project is selected
+    if (selectedProject != null) {
+        MarketProjectDetails(
+            project = selectedProject!!,
+            versions = selectedProjectVersions,
+            servers = servers,
+            onClose = { 
+                selectedProject = null
+                selectedProjectVersions = emptyList()
+            },
+            onOpenDependency = { depId ->
+                scope.launch {
+                    try {
+                        val det = byd.cxkcxkckx.mcserver.api.ModrinthAPI.getProjectDetails(depId)
+                        val vers = byd.cxkcxkckx.mcserver.api.ModrinthAPI.getProjectVersions(depId)
+                        det.onSuccess { selectedProject = it }
+                        vers.onSuccess { selectedProjectVersions = it }
+                    } catch (e: Exception) {
+                        error = e.message
+                    }
+                }
+            },
+            onInstall = { versionInfo, targetServerId ->
+                scope.launch {
+                    try {
+                        val fileUrl = versionInfo.files.firstOrNull() ?: throw Exception("无可下载文件")
+                        val server = servers.find { it.id == targetServerId } ?: throw Exception("未选择服务器")
+                        val pluginsDir = java.io.File(server.path, "plugins")
+                        if (!pluginsDir.exists()) pluginsDir.mkdirs()
+                        val fileName = fileUrl.substringAfterLast('/')
+                        val targetFile = java.io.File(pluginsDir, fileName)
+                        
+                        // 使用 addDownloadToPath 直接下载到指定路径，不受下载界面选择的核心影响
+                        val taskId = DownloadManager.addDownloadToPath(
+                            downloadUrl = fileUrl,
+                            targetFilePath = targetFile.absolutePath
+                        )
+                        println("[市场] 已添加插件下载任务: $fileName (taskId=$taskId) -> ${targetFile.absolutePath}")
+                        
+                        // 显示下载任务弹窗
+                        showDownloadsDialog = true
+                        onManualRefresh()
+                    } catch (e: Exception) {
+                        error = "安装失败: ${e.message}"
+                        e.printStackTrace()
+                    }
+                }
+            }
+        )
+    } else {
+        // Main market view with floating buttons
+        Box(modifier = Modifier.fillMaxSize()) {
+            Column(modifier = Modifier.fillMaxSize()) {
+            // Search box at top (fixed height)
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shadowElevation = 2.dp,
+                color = MaterialTheme.colorScheme.surfaceVariant
+            ) {
+                Row(
+                    modifier = Modifier.padding(16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedTextField(
+                        value = query,
+                        onValueChange = { query = it },
+                        modifier = Modifier.weight(1f),
+                        placeholder = { Text("搜索插件（例如: economy, jobs 等）") },
+                        singleLine = true
+                    )
+                    Button(
+                        onClick = {
+                            scope.launch {
+                                try {
+                                    loading = true
+                                    error = null
+                                    hasSearched = true
+                                    offset = 0
+                                    val res = byd.cxkcxkckx.mcserver.api.ModrinthAPI.searchProjects(
+                                        query.ifBlank { "minecraft" },
+                                        offset = 0
+                                    )
+                                    displayedProjects = res.getOrElse { emptyList() }
+                                    offset = displayedProjects.size
+                                    canLoadMore = displayedProjects.size >= 20
+                                } catch (e: Exception) {
+                                    error = e.message
+                                } finally {
+                                    loading = false
+                                }
+                            }
+                        },
+                        modifier = Modifier.height(56.dp)
+                    ) {
+                        Text("搜索")
+                    }
+                }
+            }
+
+                // Results area
+                Box(modifier = Modifier.fillMaxSize()) {
+                    val listState = rememberLazyListState()
+                    
+                    LazyColumn(
+                        state = listState,
+                        modifier = Modifier.fillMaxSize().padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        if (displayedProjects.isEmpty() && loading) {
+                            items(3) {
+                                ShimmerLoadingCard()
+                            }
+                        } else {
+                            items(displayedProjects, key = { it.id }) { project ->
+                                AnimatedPluginCard(
+                                    project = project,
+                                    onClick = {
+                                        println("[MarketScreen] Card clicked: ${project.title}")
+                                        selectedProject = project
+                                        scope.launch {
+                                            try {
+                                                val det = byd.cxkcxkckx.mcserver.api.ModrinthAPI.getProjectDetails(project.id)
+                                                val vers = byd.cxkcxkckx.mcserver.api.ModrinthAPI.getProjectVersions(project.id)
+                                                det.onSuccess { selectedProject = it }
+                                                vers.onSuccess { selectedProjectVersions = it }
+                                            } catch (e: Exception) {
+                                                error = e.message
+                                            }
+                                        }
+                                    }
+                                )
+                            }
+                            
+                            if (canLoadMore) {
+                                item {
+                                    Box(
+                                        modifier = Modifier.fillMaxWidth().padding(16.dp),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        if (loading) {
+                                            CircularProgressIndicator()
+                                        } else {
+                                            TextButton(onClick = { loadMore() }) {
+                                                Text("加载更多")
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Auto-load more when near bottom
+                    LaunchedEffect(listState) {
+                        snapshotFlow { listState.layoutInfo }
+                            .collect { layoutInfo ->
+                                val lastVisible = layoutInfo.visibleItemsInfo.lastOrNull()
+                                if (lastVisible != null && lastVisible.index >= displayedProjects.size - 3) {
+                                    loadMore()
+                                }
+                            }
+                    }
+
+                    error?.let { msg ->
+                        Box(
+                            modifier = Modifier.fillMaxSize(),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = "错误: $msg",
+                                color = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.padding(16.dp)
+                            )
+                        }
+                    }
+                }
+            }
+            
+            // Floating buttons
+            Column(
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                // 返回顶部按钮
+                val listState = rememberLazyListState()
+                val showScrollToTop by remember {
+                    derivedStateOf {
+                        listState.firstVisibleItemIndex > 5
+                    }
+                }
+                
+                AnimatedVisibility(
+                    visible = showScrollToTop,
+                    enter = fadeIn() + scaleIn(),
+                    exit = fadeOut() + scaleOut()
+                ) {
+                    FloatingActionButton(
+                        onClick = {
+                            scope.launch {
+                                listState.animateScrollToItem(0)
+                            }
+                        },
+                        containerColor = MaterialTheme.colorScheme.secondaryContainer
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.KeyboardArrowUp,
+                            contentDescription = "返回顶部"
+                        )
+                    }
+                }
+                
+                // 下载任务按钮
+                FloatingActionButton(
+                    onClick = { showDownloadsDialog = true },
+                    containerColor = MaterialTheme.colorScheme.primaryContainer
+                ) {
+                    Box {
+                        Icon(
+                            imageVector = Icons.Default.Download,
+                            contentDescription = "下载任务"
+                        )
+                        // 如果有活跃下载，显示徽章
+                        val activeCount = downloadTasks.count { task ->
+                            task.status == DownloadStatus.DOWNLOADING 
+                        }
+                        if (activeCount > 0) {
+                            Box(
+                                modifier = Modifier
+                                    .size(18.dp)
+                                    .align(Alignment.TopEnd)
+                                    .background(MaterialTheme.colorScheme.error, CircleShape),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = activeCount.toString(),
+                                    color = MaterialTheme.colorScheme.onError,
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Shimmer loading card for recommended section
+@Composable
+fun ShimmerLoadingCard() {
+    val infiniteTransition = rememberInfiniteTransition()
+    val shimmerAlpha by infiniteTransition.animateFloat(
+        initialValue = 0.3f,
+        targetValue = 0.7f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1000, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse
+        )
+    )
+
+    Card(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+        Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                modifier = Modifier
+                    .size(48.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = shimmerAlpha))
+            )
+            Spacer(modifier = Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth(0.6f)
+                        .height(16.dp)
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = shimmerAlpha))
+                )
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth(0.9f)
+                        .height(12.dp)
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = shimmerAlpha))
+                )
+            }
+        }
+    }
+}
+
+// Animated plugin card with hover effect
+@Composable
+fun AnimatedPluginCard(
+    project: byd.cxkcxkckx.mcserver.api.ModrinthAPI.ModrinthProject,
+    onClick: () -> Unit
+) {
+    var isHovered by remember { mutableStateOf(false) }
+    val scale by animateFloatAsState(
+        targetValue = if (isHovered) 1.02f else 1f,
+        animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy)
+    )
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .scale(scale)
+            .pointerInput(Unit) {
+                detectTapGestures(
+                    onPress = {
+                        isHovered = true
+                        tryAwaitRelease()
+                        isHovered = false
+                    },
+                    onTap = {
+                        println("[AnimatedPluginCard] onTap called for ${project.title}")
+                        onClick()
+                    }
+                )
+            },
+        shape = RoundedCornerShape(12.dp),
+        elevation = CardDefaults.cardElevation(
+            defaultElevation = if (isHovered) 8.dp else 2.dp
+        )
+    ) {
+        Row(
+            modifier = Modifier.padding(12.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            // Icon with loading state
+            val bmpState = remember { mutableStateOf<ImageBitmap?>(null) }
+            var iconLoading by remember { mutableStateOf(true) }
+
+            LaunchedEffect(project.iconUrl) {
+                iconLoading = true
+                bmpState.value = IconLoader.load(project.iconUrl)
+                iconLoading = false
+            }
+
+            Box(modifier = Modifier.size(48.dp)) {
+                val bmp = bmpState.value
+                if (bmp != null) {
+                    Image(
+                        bitmap = bmp,
+                        contentDescription = project.title,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .clip(RoundedCornerShape(8.dp))
+                    )
+                } else if (!iconLoading) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(MaterialTheme.colorScheme.primaryContainer),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            project.title.take(1).uppercase(),
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 20.sp,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer
+                        )
+                    }
+                }
+
+                if (iconLoading) {
+                    CircularProgressIndicator(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(12.dp),
+                        strokeWidth = 2.dp
+                    )
+                }
+            }
+
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(
+                    project.title,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 15.sp
+                )
+                Text(
+                    project.description ?: "无描述",
+                    maxLines = 2,
+                    fontSize = 13.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    lineHeight = 16.sp
+                )
+            }
+
+            AnimatedVisibility(
+                visible = isHovered,
+                enter = fadeIn() + scaleIn(),
+                exit = fadeOut() + scaleOut()
+            ) {
+                Icon(
+                    imageVector = Icons.Default.ChevronRight,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun MarketProjectDetails(
+    project: byd.cxkcxkckx.mcserver.api.ModrinthAPI.ModrinthProject,
+    versions: List<byd.cxkcxkckx.mcserver.api.ModrinthAPI.VersionInfo>,
+    servers: List<ServerInfo>,
+    onClose: () -> Unit,
+    onOpenDependency: (String) -> Unit,
+    onInstall: (byd.cxkcxkckx.mcserver.api.ModrinthAPI.VersionInfo, String) -> Unit
+) {
+    // Full-screen details view
+    Box(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            // Header with back button
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shadowElevation = 4.dp,
+                color = MaterialTheme.colorScheme.surfaceVariant
+            ) {
+                Row(
+                    modifier = Modifier.padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    IconButton(onClick = onClose) {
+                        Icon(imageVector = Icons.Default.ArrowBack, contentDescription = "返回")
+                    }
+
+                    val bmpState = remember { mutableStateOf<ImageBitmap?>(null) }
+                    LaunchedEffect(project.iconUrl) {
+                        bmpState.value = IconLoader.load(project.iconUrl)
+                    }
+                    val bmp = bmpState.value
+                    if (bmp != null) {
+                        Image(bitmap = bmp, contentDescription = project.title, modifier = Modifier.size(64.dp).clip(RoundedCornerShape(8.dp)))
+                    } else {
+                        Box(
+                            modifier = Modifier.size(64.dp).clip(RoundedCornerShape(8.dp)).background(MaterialTheme.colorScheme.primary.copy(alpha = 0.1f)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(project.title.take(1), fontWeight = FontWeight.Bold, fontSize = 24.sp)
+                        }
+                    }
+
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(project.title, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                        Text(project.description ?: "无描述", maxLines = 2, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+            }
+
+            // Content
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .verticalScroll(rememberScrollState())
+                    .padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                // Server selector
+                Text("安装到服务器", fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
+                if (servers.isEmpty()) {
+                    Text("没有可用服务器，请先在首页添加服务器", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                } else {
+                    var selectedServerId by remember { mutableStateOf<String?>(servers.firstOrNull()?.id) }
+                    
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        servers.forEach { s ->
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { selectedServerId = s.id }
+                                    .padding(8.dp)
+                            ) {
+                                RadioButton(selected = (selectedServerId == s.id), onClick = { selectedServerId = s.id })
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(s.name)
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    // Versions list
+                    Text("可用版本", fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
+                    if (versions.isEmpty()) {
+                        Text("暂无版本信息", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    } else {
+                        versions.forEach { v ->
+                            var expanded by remember { mutableStateOf(false) }
+                            
+                            Card(
+                                modifier = Modifier.fillMaxWidth(),
+                                onClick = { expanded = !expanded }
+                            ) {
+                                Column(modifier = Modifier.padding(12.dp)) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Row(
+                                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Text(v.name ?: v.id, fontWeight = FontWeight.SemiBold)
+                                                // 加载器标签
+                                                if (v.loaders.isNotEmpty()) {
+                                                    v.loaders.forEach { loader ->
+                                                        Text(
+                                                            text = loader,
+                                                            fontSize = 10.sp,
+                                                            color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                                            modifier = Modifier
+                                                                .background(
+                                                                    MaterialTheme.colorScheme.secondaryContainer,
+                                                                    RoundedCornerShape(4.dp)
+                                                                )
+                                                                .padding(horizontal = 6.dp, vertical = 2.dp)
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                            Text("游戏版本: ${v.gameVersions.joinToString(", ")}", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                        }
+                                        Button(onClick = {
+                                            if (selectedServerId != null) onInstall(v, selectedServerId!!)
+                                        }) {
+                                            Text("安装")
+                                        }
+                                    }
+
+                                    AnimatedVisibility(visible = expanded) {
+                                        Column(modifier = Modifier.padding(top = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                            if (v.loaders.isNotEmpty()) {
+                                                Text("加载器: ${v.loaders.joinToString(", ")}", fontSize = 12.sp)
+                                            }
+                                            if (v.files.isNotEmpty()) {
+                                                Text("文件:", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                                                v.files.forEach { f ->
+                                                    Text(f, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(start = 8.dp))
+                                                }
+                                            }
+                                            if (v.dependencies.isNotEmpty()) {
+                                                Text("依赖:", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(start = 8.dp)) {
+                                                    v.dependencies.forEach { dep ->
+                                                        TextButton(onClick = { onOpenDependency(dep) }) {
+                                                            Text(dep, fontSize = 11.sp)
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -423,12 +1067,14 @@ fun ModernHomeScreen(
     onIsStarting: (Boolean) -> Unit,
     isStopping: Boolean,
     onIsStopping: (Boolean) -> Unit,
-    serverStats: ServerStats,
-    serverState: ServerState,
-    serverLogs: List<String>,
+    serverStateInfo: ServerStateManager.ServerStateInfo?,
     onManualRefresh: () -> Unit,
     serverListRefreshTrigger: Int
 ) {
+    // Extract values from state info
+    val serverState = serverStateInfo?.state ?: ServerState.STOPPED
+    val serverLogs = serverStateInfo?.logs ?: emptyList()
+    val serverStats = serverStateInfo?.stats ?: ServerStats()
     val scope = rememberCoroutineScope()
     
     // Load servers
@@ -518,7 +1164,6 @@ fun ModernHomeScreen(
                         selectedServer = selectedServer,
                         onServerSelected = onServerSelected,
                         onConfigClick = { onShowConfigScreen(true) },
-                        // 手动刷新已在 MainScreen 层实现为一个立即生效的操作，直接调用即可
                         onRefresh = { onManualRefresh() },
                         refreshTrigger = serverListRefreshTrigger
                     )
@@ -554,6 +1199,25 @@ fun ModernHomeScreen(
                                     ServerRunner.forceKillServer(server.id)
                                     onIsStarting(false)
                                     onIsStopping(false)
+                                    
+                                    // 启动持续检查机制，每10秒检查一次直到进程真正消失
+                                    launch {
+                                        var checkCount = 0
+                                        while (checkCount < 12) { // 最多检查2分钟
+                                            delay(10000) // 每10秒检查一次
+                                            checkCount++
+                                            
+                                            val isStillRunning = ServerRunner.isServerRunning(server.id)
+                                            println("[MainScreen] 强制关闭后检查 #$checkCount: ${server.name} 运行状态=$isStillRunning")
+                                            
+                                            onManualRefresh()
+                                            
+                                            if (!isStillRunning) {
+                                                println("[MainScreen] 进程已确认消失，停止检查")
+                                                break
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         },
@@ -563,6 +1227,25 @@ fun ModernHomeScreen(
                                     selectedServer?.let { server ->
                                         onIsStopping(true)
                                         ServerRunner.stopServer(server.id)
+                                        
+                                        // 启动持续检查机制，每10秒检查一次直到进程真正消失
+                                        launch {
+                                            var checkCount = 0
+                                            while (checkCount < 12) { // 最多检查2分钟
+                                                delay(10000) // 每10秒检查一次
+                                                checkCount++
+                                                
+                                                val isStillRunning = ServerRunner.isServerRunning(server.id)
+                                                println("[MainScreen] 正常关闭后检查 #$checkCount: ${server.name} 运行状态=$isStillRunning")
+                                                
+                                                onManualRefresh()
+                                                
+                                                if (!isStillRunning) {
+                                                    println("[MainScreen] 进程已确认消失，停止检查")
+                                                    break
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -605,7 +1288,7 @@ fun ModernHomeScreen(
                             selectedServer = selectedServer,
                             onServerSelected = onServerSelected,
                             onConfigClick = { onShowConfigScreen(true) },
-                        onRefresh = { onManualRefresh() },
+                            onRefresh = { onManualRefresh() },
                             refreshTrigger = serverListRefreshTrigger
                         )
                         
@@ -640,6 +1323,25 @@ fun ModernHomeScreen(
                                         ServerRunner.forceKillServer(server.id)
                                         onIsStarting(false)
                                         onIsStopping(false)
+                                        
+                                        // 启动持续检查机制，每10秒检查一次直到进程真正消失
+                                        launch {
+                                            var checkCount = 0
+                                            while (checkCount < 12) { // 最多检查2分钟
+                                                delay(10000) // 每10秒检查一次
+                                                checkCount++
+                                                
+                                                val isStillRunning = ServerRunner.isServerRunning(server.id)
+                                                println("[MainScreen] 强制关闭后检查 #$checkCount: ${server.name} 运行状态=$isStillRunning")
+                                                
+                                                onManualRefresh()
+                                                
+                                                if (!isStillRunning) {
+                                                    println("[MainScreen] 进程已确认消失，停止检查")
+                                                    break
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             },
@@ -649,6 +1351,25 @@ fun ModernHomeScreen(
                                         selectedServer?.let { server ->
                                             onIsStopping(true)
                                             ServerRunner.stopServer(server.id)
+                                            
+                                            // 启动持续检查机制，每10秒检查一次直到进程真正消失
+                                            launch {
+                                                var checkCount = 0
+                                                while (checkCount < 12) { // 最多检查2分钟
+                                                    delay(10000) // 每10秒检查一次
+                                                    checkCount++
+                                                    
+                                                    val isStillRunning = ServerRunner.isServerRunning(server.id)
+                                                    println("[MainScreen] 正常关闭后检查 #$checkCount: ${server.name} 运行状态=$isStillRunning")
+                                                    
+                                                    onManualRefresh()
+                                                    
+                                                    if (!isStillRunning) {
+                                                        println("[MainScreen] 进程已确认消失，停止检查")
+                                                        break
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -818,7 +1539,6 @@ fun ServerSelector(
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     servers.forEach { server ->
-                        // 使用 key 确保每个服务器项在 refreshTrigger 变化时重新组合
                         key(server.id, refreshTrigger) {
                             ServerListItem(
                                 server = server,
@@ -1366,8 +2086,6 @@ fun ModernConsolePanel(
                         )
                     }
                 }
-                
-                // 清空按钮已移除；日志由 ServerRunner 管理清理
             }
             
             HorizontalDivider(

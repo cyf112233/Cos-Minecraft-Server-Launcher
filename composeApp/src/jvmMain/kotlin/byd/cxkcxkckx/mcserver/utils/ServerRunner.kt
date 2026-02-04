@@ -4,8 +4,6 @@ import byd.cxkcxkckx.mcserver.data.ServerConfig
 import byd.cxkcxkckx.mcserver.data.ServerInfo
 import byd.cxkcxkckx.mcserver.data.ServerStats
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.withContext
 import java.io.BufferedReader
 import java.io.BufferedWriter
@@ -28,16 +26,14 @@ data class ServerProcess(
     val process: Process,
     val outputReader: BufferedReader,
     val inputWriter: BufferedWriter,
-    val state: MutableStateFlow<ServerState> = MutableStateFlow(ServerState.STARTING),
-    val logs: MutableStateFlow<List<String>> = MutableStateFlow(emptyList()),
-    val stats: MutableStateFlow<ServerStats> = MutableStateFlow(ServerStats()),
     var startTime: Long = System.currentTimeMillis()
 )
 
 object ServerRunner {
     private val runningServers = mutableMapOf<String, ServerProcess>()
-    private const val DEBUG = true // Enable debug logging
-    // 自动检测系统编码
+    private const val DEBUG = true
+    
+    // Auto-detect system charset
     private val systemCharset: Charset = run {
         val osName = System.getProperty("os.name").lowercase()
         when {
@@ -117,10 +113,14 @@ object ServerRunner {
                 return@withContext Result.failure(Exception("Server already running"))
             }
             
+            // Initialize state to STARTING
+            ServerStateManager.updateState(serverInfo.id, ServerState.STARTING)
+            
             // Check server directory
             val serverDir = File(serverInfo.path)
             if (!serverDir.exists() || !serverDir.isDirectory) {
                 log("Server directory not found: ${serverInfo.path}")
+                ServerStateManager.updateState(serverInfo.id, ServerState.ERROR)
                 return@withContext Result.failure(Exception("Server directory not found"))
             }
             log("Server directory: ${serverDir.absolutePath}")
@@ -129,6 +129,7 @@ object ServerRunner {
             val jarFile = findServerJar(serverDir)
             if (jarFile == null || !jarFile.exists()) {
                 log("Server JAR file not found in: ${serverDir.absolutePath}")
+                ServerStateManager.updateState(serverInfo.id, ServerState.ERROR)
                 return@withContext Result.failure(Exception("Server JAR file not found"))
             }
             log("Found server JAR: ${jarFile.name}")
@@ -142,14 +143,12 @@ object ServerRunner {
                 .directory(serverDir)
                 .redirectErrorStream(true)
 
-            // 设置环境变量以支持 UTF-8
+            // Set environment variables for UTF-8 support
             val env = processBuilder.environment()
             val osName = System.getProperty("os.name").lowercase()
             if (osName.contains("windows")) {
-                // Windows 系统设置（尽量保持 JVM 输出为 UTF-8）
                 env["JAVA_TOOL_OPTIONS"] = "-Dfile.encoding=UTF-8 -Dconsole.encoding=UTF-8 -Dsun.stdout.encoding=UTF-8 -Dsun.stderr.encoding=UTF-8"
             } else {
-                // Linux/macOS 系统设置
                 env["LANG"] = "zh_CN.UTF-8"
                 env["LC_ALL"] = "zh_CN.UTF-8"
             }
@@ -159,9 +158,7 @@ object ServerRunner {
             log("Process started, PID: ${process.pid()}")
 
             // Create input/output streams with proper charset
-            // 输出流（读取服务器日志）使用系统编码
             val outputReader = BufferedReader(InputStreamReader(process.inputStream, systemCharset))
-            // 输入流（发送命令）也使用系统编码以确保兼容性
             val inputWriter = BufferedWriter(OutputStreamWriter(process.outputStream, systemCharset))
             log("I/O streams created with charset: ${systemCharset.name()}")
             
@@ -178,22 +175,24 @@ object ServerRunner {
             runningServers[serverInfo.id] = serverProcess
             log("Server added to running list: ${serverInfo.id}")
             
-            // Start log reader coroutine
+            // Start log reader thread
             startLogReader(serverProcess)
 
-            // Start process monitor coroutine
+            // Start process monitor thread
             startProcessMonitor(serverProcess)
             
-            // Start stats updater
+            // Start stats updater thread
             startStatsUpdater(serverProcess)
 
-            // Wait briefly to determine if the server actually starts or exits immediately
+            // Wait briefly to check if process starts successfully
             log("Server startup initiated, waiting for confirmation...")
             var waited = 0
             val maxWaitSeconds = 8
             while (waited < maxWaitSeconds) {
+                val currentState = ServerStateManager.getState(serverInfo.id)
+                
                 // If the process has become RUNNING, return success
-                if (serverProcess.state.value == ServerState.RUNNING) {
+                if (currentState == ServerState.RUNNING) {
                     log("Server started successfully")
                     return@withContext Result.success(serverProcess)
                 }
@@ -201,8 +200,9 @@ object ServerRunner {
                 // If process has already exited, consider it a failure
                 if (!serverProcess.process.isAlive) {
                     log("Process exited prematurely during startup")
-                    // collect last logs for context
-                    val lastLogs = serverProcess.logs.value.takeLast(20).joinToString("\n")
+                    val stateInfo = ServerStateManager.getStateInfo(serverInfo.id)
+                    val lastLogs = stateInfo?.logs?.takeLast(20)?.joinToString("\n") ?: "No logs available"
+                    ServerStateManager.updateState(serverInfo.id, ServerState.ERROR)
                     return@withContext Result.failure(Exception("Server process exited during startup. Recent logs:\n$lastLogs"))
                 }
 
@@ -210,18 +210,19 @@ object ServerRunner {
                 waited++
             }
 
-            // If still starting after timeout, return success but UI should continue to observe state flows
+            // If still starting after timeout, return success but UI should continue to observe
             log("Server still starting after $maxWaitSeconds seconds; returning startup pending")
             return@withContext Result.success(serverProcess)
         } catch (e: Exception) {
             log("Error starting server: ${e.message}")
             e.printStackTrace()
+            ServerStateManager.updateState(serverInfo.id, ServerState.ERROR)
             return@withContext Result.failure(e)
         }
     }
     
     /**
-     * Stop server
+     * Stop server gracefully
      */
     suspend fun stopServer(serverId: String): Boolean = withContext(Dispatchers.IO) {
         log("Stopping server: $serverId")
@@ -231,52 +232,22 @@ object ServerRunner {
         }
         
         try {
-            serverProcess.state.value = ServerState.STOPPING
+            // Set stopping state
+            ServerStateManager.updateState(serverId, ServerState.STOPPING)
             log("Server state set to STOPPING")
             
             // Send stop command
             sendCommand(serverId, "stop")
             log("Stop command sent")
             
-            // Wait for process to end (max 30 seconds)
-            var waitTime = 0
-            while (serverProcess.process.isAlive && waitTime < 30) {
-                Thread.sleep(1000)
-                waitTime++
-                if (waitTime % 5 == 0) {
-                    log("Waiting for server to stop... ${waitTime}s")
-                }
-            }
-            
-            // Force kill if still alive
-            if (serverProcess.process.isAlive) {
-                log("Server did not stop gracefully, forcing termination")
-                serverProcess.process.destroyForcibly()
-            } else {
-                log("Server stopped gracefully")
-            }
-            
-            // Close streams
-            try {
-                serverProcess.outputReader.close()
-                serverProcess.inputWriter.close()
-                log("I/O streams closed")
-            } catch (e: Exception) {
-                log("Error closing streams: ${e.message}")
-            }
-            
-            // Remove from running list
-            runningServers.remove(serverId)
-            log("Server removed from running list")
-            
-            serverProcess.state.value = ServerState.STOPPED
-            log("Server state set to STOPPED")
+            // Process monitor will handle cleanup when process exits
+            log("stopServer completed, process monitor will handle cleanup")
             
             return@withContext true
         } catch (e: Exception) {
             log("Error stopping server: ${e.message}")
             e.printStackTrace()
-            serverProcess.state.value = ServerState.ERROR
+            ServerStateManager.updateState(serverId, ServerState.ERROR)
             return@withContext false
         }
     }
@@ -292,41 +263,27 @@ object ServerRunner {
         }
         
         try {
-            // Force kill process immediately
+            // Set to STOPPED state immediately
+            ServerStateManager.updateState(serverId, ServerState.STOPPED)
+            log("Server state set to STOPPED (force kill)")
+            
+            // Force kill process
             if (serverProcess.process.isAlive) {
                 log("Force terminating process")
                 serverProcess.process.destroyForcibly()
-                
-                // Wait up to 5 seconds for the process to die
-                var waited = 0
-                while (serverProcess.process.isAlive && waited < 10) {
-                    Thread.sleep(500)
-                    waited++
-                }
                 log("Process force killed")
+            } else {
+                log("Process already dead")
             }
             
-            // Close streams
-            try {
-                serverProcess.outputReader.close()
-                serverProcess.inputWriter.close()
-                log("I/O streams closed")
-            } catch (e: Exception) {
-                log("Error closing streams: ${e.message}")
-            }
-            
-            // Remove from running list
-            runningServers.remove(serverId)
-            log("Server removed from running list")
-            
-            serverProcess.state.value = ServerState.STOPPED
-            log("Server state set to STOPPED")
+            // Process monitor will handle cleanup
+            log("forceKillServer completed, process monitor will handle cleanup")
             
             return@withContext true
         } catch (e: Exception) {
             log("Error force killing server: ${e.message}")
             e.printStackTrace()
-            serverProcess.state.value = ServerState.ERROR
+            ServerStateManager.updateState(serverId, ServerState.ERROR)
             return@withContext false
         }
     }
@@ -359,27 +316,6 @@ object ServerRunner {
      */
     fun getServerProcess(serverId: String): ServerProcess? {
         return runningServers[serverId]
-    }
-    
-    /**
-     * Get server state
-     */
-    fun getServerState(serverId: String): StateFlow<ServerState>? {
-        return runningServers[serverId]?.state
-    }
-    
-    /**
-     * Get server logs
-     */
-    fun getServerLogs(serverId: String): StateFlow<List<String>>? {
-        return runningServers[serverId]?.logs
-    }
-    
-    /**
-     * Get server stats
-     */
-    fun getServerStats(serverId: String): StateFlow<ServerStats>? {
-        return runningServers[serverId]?.stats
     }
     
     /**
@@ -416,14 +352,14 @@ object ServerRunner {
     }
     
     /**
-     * Start log reader
+     * Start log reader thread
      */
     private fun startLogReader(serverProcess: ServerProcess) {
         log("Starting log reader for: ${serverProcess.serverInfo.id}")
         
         Thread {
             try {
-                val logs = mutableListOf<String>()
+                val serverId = serverProcess.serverInfo.id
                 var line: String?
                 var lineCount = 0
                 
@@ -433,43 +369,39 @@ object ServerRunner {
                     line = serverProcess.outputReader.readLine()
                     if (line != null) {
                         lineCount++
-                        logs.add(line)
                         
-                        // Only keep last 1000 lines
-                        if (logs.size > 1000) {
-                            logs.removeAt(0)
-                        }
-                        serverProcess.logs.value = logs.toList()
+                        // Append log via state manager
+                        ServerStateManager.appendLog(serverId, line)
                         
                         // Log every 10 lines for debugging
                         if (lineCount % 10 == 0) {
                             log("Read $lineCount lines so far")
                         }
                         
-                        // Detect server startup completion - multiple patterns
+                        // Detect server startup completion
                         val lowerLine = line.lowercase()
                         if ((lowerLine.contains("done") && lowerLine.contains("for help")) ||
                             lowerLine.contains("timings reset") ||
                             (lowerLine.contains("done") && lowerLine.contains("(") && lowerLine.contains("s)")) ||
                             lowerLine.contains("server started")) {
                             
-                            log("Server startup detected! State: ${serverProcess.state.value}")
+                            log("Server startup detected! Current state: ${ServerStateManager.getState(serverId)}")
                             log("Trigger line: $line")
                             
-                            if (serverProcess.state.value == ServerState.STARTING) {
-                                serverProcess.state.value = ServerState.RUNNING
+                            if (ServerStateManager.getState(serverId) == ServerState.STARTING) {
+                                ServerStateManager.updateState(serverId, ServerState.RUNNING)
                                 log("Server state changed to RUNNING")
                             }
                         }
                         
                         // Parse player events
-                        parsePlayerEvents(line, serverProcess)
+                        parsePlayerEvents(line, serverId)
                         
                         // Parse TPS information
-                        parseTpsInfo(line, serverProcess)
+                        parseTpsInfo(line, serverId)
                         
                         // Parse memory info
-                        parseMemoryInfo(line, serverProcess)
+                        parseMemoryInfo(line, serverId)
                     } else {
                         // End of stream
                         log("End of log stream reached")
@@ -491,37 +423,39 @@ object ServerRunner {
     /**
      * Parse player join/leave events from logs
      */
-    private fun parsePlayerEvents(line: String, serverProcess: ServerProcess) {
+    private fun parsePlayerEvents(line: String, serverId: String) {
         try {
             val lowerLine = line.lowercase()
             
             // Player joined
             if (lowerLine.contains("joined the game") || lowerLine.contains("logged in")) {
-                val current = serverProcess.stats.value
-                serverProcess.stats.value = current.copy(
-                    onlinePlayers = (current.onlinePlayers + 1).coerceAtMost(current.maxPlayers)
-                )
-                log("Player joined, online: ${serverProcess.stats.value.onlinePlayers}")
+                ServerStateManager.updateStatsPartial(serverId) { current ->
+                    current.copy(
+                        onlinePlayers = (current.onlinePlayers + 1).coerceAtMost(current.maxPlayers)
+                    )
+                }
+                log("Player joined, online: ${ServerStateManager.getStateInfo(serverId)?.stats?.onlinePlayers}")
             }
             
             // Player left
             if (lowerLine.contains("left the game") || lowerLine.contains("logged out") || 
                 lowerLine.contains("disconnected")) {
-                val current = serverProcess.stats.value
-                serverProcess.stats.value = current.copy(
-                    onlinePlayers = (current.onlinePlayers - 1).coerceAtLeast(0)
-                )
-                log("Player left, online: ${serverProcess.stats.value.onlinePlayers}")
+                ServerStateManager.updateStatsPartial(serverId) { current ->
+                    current.copy(
+                        onlinePlayers = (current.onlinePlayers - 1).coerceAtLeast(0)
+                    )
+                }
+                log("Player left, online: ${ServerStateManager.getStateInfo(serverId)?.stats?.onlinePlayers}")
             }
             
-            // Parse max players from server.properties loading message
-            // Example: "Max players: 20"
+            // Parse max players
             val maxPlayersMatch = Regex("max.*players.*[:\\s]+(\\d+)", RegexOption.IGNORE_CASE).find(line)
             if (maxPlayersMatch != null) {
                 val maxPlayers = maxPlayersMatch.groupValues[1].toIntOrNull()
                 if (maxPlayers != null) {
-                    val current = serverProcess.stats.value
-                    serverProcess.stats.value = current.copy(maxPlayers = maxPlayers)
+                    ServerStateManager.updateStatsPartial(serverId) { current ->
+                        current.copy(maxPlayers = maxPlayers)
+                    }
                     log("Max players set to: $maxPlayers")
                 }
             }
@@ -533,17 +467,15 @@ object ServerRunner {
     /**
      * Parse TPS information from logs
      */
-    private fun parseTpsInfo(line: String, serverProcess: ServerProcess) {
+    private fun parseTpsInfo(line: String, serverId: String) {
         try {
-            // TPS from /tps command or Paper's TPS message
-            // Example: "TPS from last 1m, 5m, 15m: 20.0, 20.0, 20.0"
-            // Example: "Current TPS = 20.0"
             val tpsMatch = Regex("tps.*?([0-9]+\\.[0-9]+)", RegexOption.IGNORE_CASE).find(line)
             if (tpsMatch != null) {
                 val tps = tpsMatch.groupValues[1].toDoubleOrNull()
                 if (tps != null && tps <= 20.0) {
-                    val current = serverProcess.stats.value
-                    serverProcess.stats.value = current.copy(tps = tps)
+                    ServerStateManager.updateStatsPartial(serverId) { current ->
+                        current.copy(tps = tps)
+                    }
                     log("TPS updated: $tps")
                 }
             }
@@ -555,21 +487,19 @@ object ServerRunner {
     /**
      * Parse memory information from logs
      */
-    private fun parseMemoryInfo(line: String, serverProcess: ServerProcess) {
+    private fun parseMemoryInfo(line: String, serverId: String) {
         try {
-            // Memory from various sources
-            // Example: "Memory: 512M/2048M"
-            // Example: "Used memory: 512 MB / Total: 2048 MB"
             val memoryMatch = Regex("(\\d+)\\s*(?:m|mb).*?(\\d+)\\s*(?:m|mb|g|gb)", RegexOption.IGNORE_CASE).find(line)
             if (memoryMatch != null) {
                 val used = memoryMatch.groupValues[1].toLongOrNull()
                 val total = memoryMatch.groupValues[2].toLongOrNull()
                 if (used != null && total != null) {
-                    val current = serverProcess.stats.value
-                    serverProcess.stats.value = current.copy(
-                        usedMemoryMB = used,
-                        maxMemoryMB = if (total > 100) total else total * 1024 // Convert GB to MB if needed
-                    )
+                    ServerStateManager.updateStatsPartial(serverId) { current ->
+                        current.copy(
+                            usedMemoryMB = used,
+                            maxMemoryMB = if (total > 100) total else total * 1024
+                        )
+                    }
                     log("Memory updated: ${used}MB / ${total}MB")
                 }
             }
@@ -584,29 +514,33 @@ object ServerRunner {
     private fun startStatsUpdater(serverProcess: ServerProcess) {
         thread(name = "StatsUpdater-${serverProcess.serverInfo.id}", isDaemon = true) {
             try {
+                val serverId = serverProcess.serverInfo.id
+                
                 while (serverProcess.process.isAlive) {
                     // Update uptime every second
                     val uptimeSeconds = (System.currentTimeMillis() - serverProcess.startTime) / 1000
-                    val current = serverProcess.stats.value
-                    serverProcess.stats.value = current.copy(uptimeSeconds = uptimeSeconds)
                     
-                    // Get memory info from JVM
-                    try {
-                        val runtime = Runtime.getRuntime()
-                        val usedMemory = (runtime.totalMemory() - runtime.freeMemory()) / (1024 * 1024)
-                        val maxMemory = runtime.maxMemory() / (1024 * 1024)
-                        
-                        if (current.maxMemoryMB == 0L) {
-                            serverProcess.stats.value = current.copy(
-                                usedMemoryMB = usedMemory,
-                                maxMemoryMB = maxMemory,
-                                uptimeSeconds = uptimeSeconds
-                            )
-                        } else {
-                            serverProcess.stats.value = current.copy(uptimeSeconds = uptimeSeconds)
+                    ServerStateManager.updateStatsPartial(serverId) { current ->
+                        current.copy(uptimeSeconds = uptimeSeconds)
+                    }
+                    
+                    // Get memory info from JVM if not set
+                    val currentStats = ServerStateManager.getStateInfo(serverId)?.stats
+                    if (currentStats?.maxMemoryMB == 0L) {
+                        try {
+                            val runtime = Runtime.getRuntime()
+                            val usedMemory = (runtime.totalMemory() - runtime.freeMemory()) / (1024 * 1024)
+                            val maxMemory = runtime.maxMemory() / (1024 * 1024)
+                            
+                            ServerStateManager.updateStatsPartial(serverId) { current ->
+                                current.copy(
+                                    usedMemoryMB = usedMemory,
+                                    maxMemoryMB = maxMemory
+                                )
+                            }
+                        } catch (e: Exception) {
+                            // Ignore memory read errors
                         }
-                    } catch (e: Exception) {
-                        // Ignore memory read errors
                     }
                     
                     Thread.sleep(1000)
@@ -618,37 +552,58 @@ object ServerRunner {
     }
     
     /**
-     * Start process monitor
+     * Start process monitor thread
      */
     private fun startProcessMonitor(serverProcess: ServerProcess) {
         log("Starting process monitor for: ${serverProcess.serverInfo.id}")
         
         Thread {
             try {
+                val serverId = serverProcess.serverInfo.id
                 log("Process monitor thread started")
+                
+                // Monitor process while alive
+                while (serverProcess.process.isAlive) {
+                    Thread.sleep(1000)
+                    
+                    // Check for forced stop
+                    val currentState = ServerStateManager.getState(serverId)
+                    if (currentState == ServerState.STOPPED || currentState == ServerState.ERROR) {
+                        log("State mismatch detected: state=$currentState but process is alive")
+                        serverProcess.process.destroyForcibly()
+                        break
+                    }
+                }
+                
+                // Process has exited, wait for exit code
                 val exitCode = serverProcess.process.waitFor()
                 log("Process exited with code: $exitCode")
                 
-                if (serverProcess.state.value != ServerState.STOPPING) {
+                val currentState = ServerStateManager.getState(serverId)
+                if (currentState != ServerState.STOPPING) {
                     // Abnormal exit
                     log("Abnormal server exit detected")
-                    serverProcess.state.value = ServerState.ERROR
-                    val errorLog = "[CMSL] Server crashed with exit code: $exitCode"
-                    val logs = serverProcess.logs.value.toMutableList()
-                    logs.add(errorLog)
-                    serverProcess.logs.value = logs
+                    ServerStateManager.updateState(serverId, ServerState.ERROR)
+                    ServerStateManager.appendLog(serverId, "[CMSL] Server crashed with exit code: $exitCode")
                 } else {
                     log("Normal server shutdown")
-                    serverProcess.state.value = ServerState.STOPPED
+                    ServerStateManager.updateState(serverId, ServerState.STOPPED)
                 }
                 
+                // Ensure state update propagates
+                Thread.sleep(500)
+                
                 // Remove from running list
-                runningServers.remove(serverProcess.serverInfo.id)
-                log("Server removed from running list: ${serverProcess.serverInfo.id}")
+                runningServers.remove(serverId)
+                log("Server removed from running list: $serverId")
+                
+                // Final confirmation of STOPPED state
+                ServerStateManager.updateState(serverId, ServerState.STOPPED)
+                log("Final state set to STOPPED")
             } catch (e: Exception) {
                 log("Error in process monitor: ${e.message}")
                 e.printStackTrace()
-                serverProcess.state.value = ServerState.ERROR
+                ServerStateManager.updateState(serverProcess.serverInfo.id, ServerState.ERROR)
             }
         }.apply {
             name = "ProcessMonitor-${serverProcess.serverInfo.id}"

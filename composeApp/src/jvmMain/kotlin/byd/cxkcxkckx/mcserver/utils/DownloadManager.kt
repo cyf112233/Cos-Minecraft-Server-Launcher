@@ -71,6 +71,38 @@ object DownloadManager {
         
         return taskId
     }
+
+    /**
+     * 添加下载任务到指定目标文件路径（用于将文件下载到任意位置，例如服务器的 plugins 目录）
+     */
+    fun addDownloadToPath(downloadUrl: String, targetFilePath: String): String {
+        println("\n=== 添加下载任务（自定义路径） ===")
+        println("下载 URL: $downloadUrl")
+        println("目标文件路径: $targetFilePath")
+
+        val taskId = UUID.randomUUID().toString()
+        val fileName = java.io.File(targetFilePath).name
+
+        val task = DownloadTask(
+            id = taskId,
+            serverType = ServerType.PAPER, // 占位，plugins 下载不依赖 serverType 字段
+            version = "",
+            build = "",
+            fileName = fileName,
+            downloadUrl = downloadUrl,
+            targetPath = targetFilePath,
+            status = DownloadStatus.PENDING
+        )
+
+        _tasks.value = _tasks.value + task
+
+        // 开始下载
+        scope.launch {
+            downloadFile(task)
+        }
+
+        return taskId
+    }
     
     /**
      * 获取文件夹名称，如果已存在则添加序号
