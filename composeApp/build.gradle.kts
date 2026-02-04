@@ -45,7 +45,7 @@ compose.desktop {
         nativeDistributions {
             targetFormats(TargetFormat.Dmg, TargetFormat.Msi, TargetFormat.Deb)
             packageName = "Cos Minecraft Server Launcher"
-            packageVersion = "1.0.0"
+            packageVersion = "1.0.1"
             
             // Application description
             description = "A modern Minecraft server launcher built with Compose Multiplatform"

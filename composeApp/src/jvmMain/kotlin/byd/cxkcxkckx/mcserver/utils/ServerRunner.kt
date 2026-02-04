@@ -33,21 +33,6 @@ object ServerRunner {
     private val runningServers = mutableMapOf<String, ServerProcess>()
     private const val DEBUG = true
     
-    // Auto-detect system charset
-    private val systemCharset: Charset = run {
-        val osName = System.getProperty("os.name").lowercase()
-        when {
-            osName.contains("windows") -> {
-                try {
-                    Charset.forName("GBK")
-                } catch (e: Exception) {
-                    Charsets.UTF_8
-                }
-            }
-            else -> Charsets.UTF_8
-        }
-    }
-    
     private fun log(message: String) {
         if (DEBUG) {
             println("[ServerRunner] $message")
@@ -100,11 +85,10 @@ object ServerRunner {
     }
     
     /**
-     * Start server
+     * Start server with UTF-8 encoding
      */
     suspend fun startServer(serverInfo: ServerInfo): Result<ServerProcess> = withContext(Dispatchers.IO) {
         log("Starting server: ${serverInfo.name} (${serverInfo.id})")
-        log("System charset: ${systemCharset.name()}")
         
         try {
             // Check if server is already running
@@ -143,24 +127,29 @@ object ServerRunner {
                 .directory(serverDir)
                 .redirectErrorStream(true)
 
-            // Set environment variables for UTF-8 support
+            // Set environment variables for UTF-8 support (subprocess only, won't affect system)
             val env = processBuilder.environment()
             val osName = System.getProperty("os.name").lowercase()
             if (osName.contains("windows")) {
+                // Windows: Force UTF-8 encoding for Java subprocess
                 env["JAVA_TOOL_OPTIONS"] = "-Dfile.encoding=UTF-8 -Dconsole.encoding=UTF-8 -Dsun.stdout.encoding=UTF-8 -Dsun.stderr.encoding=UTF-8"
+                env["_JAVA_OPTIONS"] = "-Dfile.encoding=UTF-8"
+                log("Set Windows UTF-8 environment variables for subprocess")
             } else {
+                // Linux/Mac: Force UTF-8 locale
                 env["LANG"] = "zh_CN.UTF-8"
                 env["LC_ALL"] = "zh_CN.UTF-8"
+                log("Set Unix UTF-8 environment variables for subprocess")
             }
 
             log("Starting process...")
             val process = processBuilder.start()
             log("Process started, PID: ${process.pid()}")
 
-            // Create input/output streams with proper charset
-            val outputReader = BufferedReader(InputStreamReader(process.inputStream, systemCharset))
-            val inputWriter = BufferedWriter(OutputStreamWriter(process.outputStream, systemCharset))
-            log("I/O streams created with charset: ${systemCharset.name()}")
+            // Create input/output streams with UTF-8 encoding
+            val outputReader = BufferedReader(InputStreamReader(process.inputStream, Charsets.UTF_8))
+            val inputWriter = BufferedWriter(OutputStreamWriter(process.outputStream, Charsets.UTF_8))
+            log("I/O streams created with UTF-8 encoding")
             
             // Create server process object
             val serverProcess = ServerProcess(
