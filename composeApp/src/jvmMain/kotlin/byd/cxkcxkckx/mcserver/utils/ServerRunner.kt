@@ -12,6 +12,7 @@ import java.io.BufferedWriter
 import java.io.File
 import java.io.InputStreamReader
 import java.io.OutputStreamWriter
+import java.nio.charset.Charset
 import kotlin.concurrent.thread
 
 enum class ServerState {
@@ -36,6 +37,20 @@ data class ServerProcess(
 object ServerRunner {
     private val runningServers = mutableMapOf<String, ServerProcess>()
     private const val DEBUG = true // Enable debug logging
+    // 自动检测系统编码
+    private val systemCharset: Charset = run {
+        val osName = System.getProperty("os.name").lowercase()
+        when {
+            osName.contains("windows") -> {
+                try {
+                    Charset.forName("GBK")
+                } catch (e: Exception) {
+                    Charsets.UTF_8
+                }
+            }
+            else -> Charsets.UTF_8
+        }
+    }
     
     private fun log(message: String) {
         if (DEBUG) {
@@ -93,6 +108,7 @@ object ServerRunner {
      */
     suspend fun startServer(serverInfo: ServerInfo): Result<ServerProcess> = withContext(Dispatchers.IO) {
         log("Starting server: ${serverInfo.name} (${serverInfo.id})")
+        log("System charset: ${systemCharset.name()}")
         
         try {
             // Check if server is already running
@@ -125,15 +141,29 @@ object ServerRunner {
             val processBuilder = ProcessBuilder(command)
                 .directory(serverDir)
                 .redirectErrorStream(true)
-            
+
+            // 设置环境变量以支持 UTF-8
+            val env = processBuilder.environment()
+            val osName = System.getProperty("os.name").lowercase()
+            if (osName.contains("windows")) {
+                // Windows 系统设置（尽量保持 JVM 输出为 UTF-8）
+                env["JAVA_TOOL_OPTIONS"] = "-Dfile.encoding=UTF-8 -Dconsole.encoding=UTF-8 -Dsun.stdout.encoding=UTF-8 -Dsun.stderr.encoding=UTF-8"
+            } else {
+                // Linux/macOS 系统设置
+                env["LANG"] = "zh_CN.UTF-8"
+                env["LC_ALL"] = "zh_CN.UTF-8"
+            }
+
             log("Starting process...")
             val process = processBuilder.start()
             log("Process started, PID: ${process.pid()}")
-            
-            // Create input/output streams
-            val outputReader = BufferedReader(InputStreamReader(process.inputStream, Charsets.UTF_8))
-            val inputWriter = BufferedWriter(OutputStreamWriter(process.outputStream, Charsets.UTF_8))
-            log("I/O streams created")
+
+            // Create input/output streams with proper charset
+            // 输出流（读取服务器日志）使用系统编码
+            val outputReader = BufferedReader(InputStreamReader(process.inputStream, systemCharset))
+            // 输入流（发送命令）也使用系统编码以确保兼容性
+            val inputWriter = BufferedWriter(OutputStreamWriter(process.outputStream, systemCharset))
+            log("I/O streams created with charset: ${systemCharset.name()}")
             
             // Create server process object
             val serverProcess = ServerProcess(

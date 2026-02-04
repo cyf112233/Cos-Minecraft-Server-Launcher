@@ -30,11 +30,15 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import byd.cxkcxkckx.mcserver.data.ServerInfo
+import byd.cxkcxkckx.mcserver.data.ServerStats
 import byd.cxkcxkckx.mcserver.utils.AnsiColorParser
 import byd.cxkcxkckx.mcserver.utils.ServerManager
 import byd.cxkcxkckx.mcserver.utils.ServerRunner
 import byd.cxkcxkckx.mcserver.utils.ServerState
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @Composable
 fun MainScreen() {
@@ -50,9 +54,16 @@ fun MainScreen() {
     var isStarting by remember { mutableStateOf(false) }
     var isStopping by remember { mutableStateOf(false) }
     
-    // Hoist server state and logs to MainScreen
+    // Hoist server state, stats and logs to MainScreen
     var serverState by remember { mutableStateOf(ServerState.STOPPED) }
     var serverLogs by remember { mutableStateOf<List<String>>(emptyList()) }
+    var serverStats by remember { mutableStateOf(ServerStats()) }
+    // 服务器列表状态刷新触发器
+    var serverListRefreshTrigger by remember { mutableStateOf(0) }
+    // 记录上一次巡检到的服务器状态，用于检测是否从 STARTING/STOPPING 跳出
+    var prevServerStates by remember { mutableStateOf<Map<String, ServerState>>(emptyMap()) }
+    // 记录上一次是否处于过渡状态（用于边沿检测）
+    var prevHasTransitioning by remember { mutableStateOf(false) }
     
     val scope = rememberCoroutineScope()
     
@@ -60,22 +71,39 @@ fun MainScreen() {
     LaunchedEffect(selectedServer?.id) {
         val serverId = selectedServer?.id
         println("[MainScreen] LaunchedEffect for serverId=$serverId")
-        if (serverId != null) {
+        // 切换服务器时触发一次列表刷新，确保状态/日志在 UI 中同步更新
+        serverListRefreshTrigger++
+            if (serverId != null) {
             // Reset state when switching servers
             serverState = ServerState.STOPPED
             serverLogs = emptyList()
+                serverStats = ServerStats()
             isStarting = false
             isStopping = false
             
             val stateFlow = ServerRunner.getServerState(serverId)
             val logsFlow = ServerRunner.getServerLogs(serverId)
             
+            // track previous state so we can detect transitions (e.g. STARTING -> RUNNING)
+            var prevState: ServerState? = null
+
             val stateJob = stateFlow?.let { flow ->
                 launch {
                     println("[MainScreen] collecting state for $serverId")
                     flow.collect { state ->
                         println("[MainScreen] state update for $serverId -> $state")
+                        // 如果从 STARTING 变为 RUNNING：不要立即刷新，改为延迟 3 秒后刷新，
+                        // 以避免瞬时状态波动导致 UI 频繁变化（用户要求的“跳出自动刷新”延迟行为）。
+                        if (prevState == ServerState.STARTING && state == ServerState.RUNNING) {
+                            println("[MainScreen] Detected STARTING -> RUNNING for $serverId, scheduling delayed (3s) list refresh")
+                            launch {
+                                delay(3000)
+                                println("[MainScreen] Delayed (3s) refresh for $serverId")
+                                serverListRefreshTrigger++
+                            }
+                        }
                         serverState = state
+                        prevState = state
                         if (state == ServerState.RUNNING) {
                             isStarting = false
                         }
@@ -96,6 +124,16 @@ fun MainScreen() {
                     }
                 }
             }
+
+            val statsJob = ServerRunner.getServerStats(serverId)?.let { flow ->
+                launch {
+                    println("[MainScreen] collecting stats for $serverId")
+                    flow.collect { stats ->
+                        println("[MainScreen] stats update for $serverId -> tps=${stats.tps} players=${stats.onlinePlayers}")
+                        serverStats = stats
+                    }
+                }
+            }
             
             try {
                 kotlinx.coroutines.awaitCancellation()
@@ -103,6 +141,7 @@ fun MainScreen() {
                 println("[MainScreen] Cancelling collectors for $serverId")
                 stateJob?.cancel()
                 logsJob?.cancel()
+                statsJob?.cancel()
             }
         } else {
             println("[MainScreen] no server selected, resetting state")
@@ -112,6 +151,94 @@ fun MainScreen() {
             isStopping = false
         }
     }
+
+    // 定期检查服务器状态：每10秒巡检一次
+    // 逻辑：
+    // - 如果当前巡检检测到有服务器处于过渡状态（STARTING/STOPPING），则每次巡检都触发刷新
+    // - 如果当前为非过渡状态但上次为过渡状态（离开过渡），则触发一次刷新并更新选中服务器信息
+    // - 否则不触发额外刷新
+    LaunchedEffect(servers) {
+        while (true) {
+            delay(10000) // 每10秒检查一次
+
+            // 检查当前是否有服务器处于过渡状态
+            val hasTransitioning = servers.any { server ->
+                val state = ServerRunner.getServerState(server.id)?.value
+                state == ServerState.STARTING || state == ServerState.STOPPING
+            }
+
+            if (hasTransitioning) {
+                // 如果当前有处于过渡的服务器，每次巡检都刷新
+                println("[MainScreen] 检测到过渡状态的服务器，触发服务器列表刷新")
+                serverListRefreshTrigger++
+            } else if (!hasTransitioning && prevHasTransitioning) {
+                // 刚刚从过渡状态离开：先触发一次立即刷新，10 秒后再触发一次以确保状态稳定
+                println("[MainScreen] 检测到离开过渡状态，触发一次立即刷新并在10秒后再次刷新以稳定更新")
+                serverListRefreshTrigger++
+                // 在后台计划一次延迟刷新（而不是立即双触发）
+                launch {
+                    delay(10000)
+                    println("[MainScreen] 延迟刷新（10s）触发")
+                    serverListRefreshTrigger++
+                }
+                selectedServer?.let { sel ->
+                    val s = ServerRunner.getServerState(sel.id)?.value
+                    if (s != null) {
+                        println("[MainScreen] 刷新选中服务器状态: ${sel.id} -> $s")
+                        serverState = s
+                    }
+                    val l = ServerRunner.getServerLogs(sel.id)?.value
+                    if (l != null) {
+                        println("[MainScreen] 刷新选中服务器日志: ${sel.id} -> size=${l.size}")
+                        serverLogs = l
+                    }
+                }
+            }
+
+            // 更新历史标志和 prevServerStates（保留历史）
+            prevHasTransitioning = hasTransitioning
+            prevServerStates = servers.associate { server ->
+                server.id to (ServerRunner.getServerState(server.id)?.value ?: ServerState.STOPPED)
+            }
+            // 继续循环；LaunchedEffect 在 servers 发生变化时会重启
+        }
+    }
+
+    // 响应外部或手动触发的刷新（serverListRefreshTrigger）
+    // 刷新时同时更新：服务器列表、选中服务器状态、选中服务器日志
+    LaunchedEffect(serverListRefreshTrigger) {
+        println("[MainScreen] Refresh trigger fired: $serverListRefreshTrigger")
+        scope.launch {
+            try {
+                // 重新扫描服务器列表
+                val newServers = ServerManager.scanServers()
+                println("[MainScreen] Scanned servers: size=${newServers.size}")
+                servers = newServers
+
+                // 刷新选中服务器的状态与日志（如果存在）
+                selectedServer?.let { sel ->
+                    val s = ServerRunner.getServerState(sel.id)?.value
+                    if (s != null) {
+                        println("[MainScreen] Refreshed selected server state: ${sel.id} -> $s")
+                        serverState = s
+                    }
+                    val l = ServerRunner.getServerLogs(sel.id)?.value
+                    if (l != null) {
+                        println("[MainScreen] Refreshed selected server logs: ${sel.id} -> size=${l.size}")
+                        serverLogs = l
+                    }
+                    val stats = ServerRunner.getServerStats(sel.id)?.value
+                    if (stats != null) {
+                        println("[MainScreen] Refreshed selected server stats: ${sel.id} -> tps=${stats.tps}")
+                        serverStats = stats
+                    }
+                }
+            } catch (e: Exception) {
+                println("[MainScreen] Error during refresh: ${e.message}")
+            }
+        }
+    }
+
     
     Column(modifier = Modifier.fillMaxSize()) {
         Surface(
@@ -188,8 +315,50 @@ fun MainScreen() {
                         onIsStarting = { isStarting = it },
                         isStopping = isStopping,
                         onIsStopping = { isStopping = it },
-                        serverState = serverState,
-                        serverLogs = serverLogs
+                        serverStats = serverStats,
+                    serverState = serverState,
+                    serverLogs = serverLogs,
+                    // 手动刷新现在会立即触发一次 refresh trigger，以保证 LaunchedEffect(serverListRefreshTrigger) 立刻响应。
+                    // 同时在后台进行一次 IO 扫描并把结果写回 servers（以便用户尽快看到列表变化）。
+                    onManualRefresh = {
+                        // 立即触发一次 refresh（同步修改），保证所有依赖该 trigger 的副作用被唤醒
+                        println("[MainScreen] onManualRefresh invoked - incrementing serverListRefreshTrigger")
+                        serverListRefreshTrigger++
+
+                        // 立刻刷新选中服务器的状态与日志（同步读取 StateFlow 的当前值），
+                        // 以避免 UI 在后台扫描完成前仍显示过时的启动/停止标志。
+                        selectedServer?.let { sel ->
+                            val s = ServerRunner.getServerState(sel.id)?.value
+                            if (s != null) {
+                                println("[MainScreen] onManualRefresh: selected server state -> $s")
+                                serverState = s
+                                // 保持 isStarting/isStopping 与实际 state 同步
+                                isStarting = (s == ServerState.STARTING)
+                                isStopping = (s == ServerState.STOPPING)
+                            }
+                            val l = ServerRunner.getServerLogs(sel.id)?.value
+                            if (l != null) {
+                                println("[MainScreen] onManualRefresh: selected server logs size=${l.size}")
+                                serverLogs = l
+                            }
+                        }
+
+                        // 异步执行扫描并更新 servers（不再在完成时再改动 trigger）
+                        scope.launch {
+                            try {
+                                val newServers = withContext(Dispatchers.IO) { ServerManager.scanServers() }
+                                println("[MainScreen] Manual refresh scanned servers: size=${newServers.size}")
+                                servers = newServers
+                                // 保持或更新选中服务器
+                                selectedServer = selectedServer?.let { current ->
+                                    newServers.find { it.id == current.id } ?: newServers.firstOrNull()
+                                } ?: newServers.firstOrNull()
+                            } catch (e: Exception) {
+                                println("[MainScreen] Error during manual refresh: ${e.message}")
+                            }
+                        }
+                    },
+                        serverListRefreshTrigger = serverListRefreshTrigger
                     )
                     1 -> DownloadScreen()
                     2 -> SettingsScreen()
@@ -254,8 +423,11 @@ fun ModernHomeScreen(
     onIsStarting: (Boolean) -> Unit,
     isStopping: Boolean,
     onIsStopping: (Boolean) -> Unit,
+    serverStats: ServerStats,
     serverState: ServerState,
-    serverLogs: List<String>
+    serverLogs: List<String>,
+    onManualRefresh: () -> Unit,
+    serverListRefreshTrigger: Int
 ) {
     val scope = rememberCoroutineScope()
     
@@ -346,7 +518,9 @@ fun ModernHomeScreen(
                         selectedServer = selectedServer,
                         onServerSelected = onServerSelected,
                         onConfigClick = { onShowConfigScreen(true) },
-                        onRefresh = { loadServers() }
+                        // 手动刷新已在 MainScreen 层实现为一个立即生效的操作，直接调用即可
+                        onRefresh = { onManualRefresh() },
+                        refreshTrigger = serverListRefreshTrigger
                     )
                     
                     ModernServerControl(
@@ -354,6 +528,7 @@ fun ModernHomeScreen(
                         selectedServer = selectedServer,
                         isStarting = isStarting,
                         isStopping = isStopping,
+                        onManualRefresh = onManualRefresh,
                         onStartClick = {
                             if (!isStarting && serverState == ServerState.STOPPED) {
                                 scope.launch {
@@ -394,12 +569,11 @@ fun ModernHomeScreen(
                         }
                     )
                     
-                    ModernStatsGrid()
+                    ModernStatsGrid(serverStats = serverStats)
                     
                     ModernConsolePanel(
                         logs = serverLogs,
                         serverRunning = serverState == ServerState.RUNNING,
-                        onClearClick = { /* 清空由 ServerRunner 管理 */ },
                         onSendCommand = { command ->
                             scope.launch {
                                 selectedServer?.let { server ->
@@ -431,7 +605,8 @@ fun ModernHomeScreen(
                             selectedServer = selectedServer,
                             onServerSelected = onServerSelected,
                             onConfigClick = { onShowConfigScreen(true) },
-                            onRefresh = { loadServers() }
+                        onRefresh = { onManualRefresh() },
+                            refreshTrigger = serverListRefreshTrigger
                         )
                         
                         ModernServerControl(
@@ -439,6 +614,7 @@ fun ModernHomeScreen(
                             selectedServer = selectedServer,
                             isStarting = isStarting,
                             isStopping = isStopping,
+                            onManualRefresh = onManualRefresh,
                             onStartClick = {
                                 if (!isStarting && serverState == ServerState.STOPPED) {
                                     scope.launch {
@@ -478,13 +654,12 @@ fun ModernHomeScreen(
                                 }
                             }
                         )
-                        ModernStatsGrid()
+                        ModernStatsGrid(serverStats = serverStats)
                     }
                     
                     ModernConsolePanel(
                         logs = serverLogs,
                         serverRunning = serverState == ServerState.RUNNING,
-                        onClearClick = { /* 清空由 ServerRunner 管理 */ },
                         onSendCommand = { command ->
                             scope.launch {
                                 selectedServer?.let { server ->
@@ -591,7 +766,8 @@ fun ServerSelector(
     selectedServer: ServerInfo?,
     onServerSelected: (ServerInfo?) -> Unit,
     onConfigClick: () -> Unit,
-    onRefresh: () -> Unit
+    onRefresh: () -> Unit,
+    refreshTrigger: Int
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -642,20 +818,23 @@ fun ServerSelector(
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     servers.forEach { server ->
-                        ServerListItem(
-                            server = server,
-                            isSelected = server == selectedServer,
-                            isRunning = ServerRunner.isServerRunning(server.id),
-                            onClick = {
-                                println("[MainScreen] Server selected: ${server.name} (${server.id})")
-                                onServerSelected(server)
-                            },
-                            onConfigClick = {
-                                println("[MainScreen] Open config for: ${server.name} (${server.id})")
-                                onServerSelected(server)
-                                onConfigClick()
-                            }
-                        )
+                        // 使用 key 确保每个服务器项在 refreshTrigger 变化时重新组合
+                        key(server.id, refreshTrigger) {
+                            ServerListItem(
+                                server = server,
+                                isSelected = server == selectedServer,
+                                isRunning = ServerRunner.isServerRunning(server.id),
+                                onClick = {
+                                    println("[MainScreen] Server selected: ${server.name} (${server.id})")
+                                    onServerSelected(server)
+                                },
+                                onConfigClick = {
+                                    println("[MainScreen] Open config for: ${server.name} (${server.id})")
+                                    onServerSelected(server)
+                                    onConfigClick()
+                                }
+                            )
+                        }
                     }
                 }
             }
@@ -759,6 +938,7 @@ fun ModernServerControl(
     selectedServer: ServerInfo?,
     isStarting: Boolean,
     isStopping: Boolean,
+    onManualRefresh: () -> Unit,
     onStartClick: () -> Unit,
     onForceKillClick: () -> Unit,
     onStopClick: () -> Unit
@@ -813,12 +993,24 @@ fun ModernServerControl(
                     }
                 }
                 
-                StatusIndicator(
-                    state = when {
-                        isStarting || isStopping -> ServerState.STARTING
-                        else -> serverState
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    StatusIndicator(
+                        state = when {
+                            isStarting || isStopping -> ServerState.STARTING
+                            else -> serverState
+                        }
+                    )
+                    IconButton(
+                        onClick = { onManualRefresh() },
+                        modifier = Modifier.size(36.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Refresh,
+                            contentDescription = "刷新状态",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
-                )
+                }
             }
             
             AnimatedContent(
@@ -1036,7 +1228,7 @@ fun StatusIndicator(state: ServerState) {
 }
 
 @Composable
-fun ModernStatsGrid() {
+fun ModernStatsGrid(serverStats: ServerStats) {
     Column(
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
@@ -1045,13 +1237,13 @@ fun ModernStatsGrid() {
         ) {
             StatCard(
                 label = "在线玩家",
-                value = "0",
-                subValue = "/ 20",
+                value = serverStats.onlinePlayers.toString(),
+                subValue = "/ ${serverStats.maxPlayers}",
                 modifier = Modifier.weight(1f)
             )
             StatCard(
                 label = "TPS",
-                value = "20.0",
+                value = String.format("%.1f", serverStats.tps),
                 subValue = "",
                 modifier = Modifier.weight(1f)
             )
@@ -1061,13 +1253,13 @@ fun ModernStatsGrid() {
         ) {
             StatCard(
                 label = "内存",
-                value = "0 MB",
-                subValue = "/ 2 GB",
+                value = "${serverStats.usedMemoryMB} MB",
+                subValue = "/ ${serverStats.maxMemoryMB} MB",
                 modifier = Modifier.weight(1f)
             )
             StatCard(
                 label = "运行时间",
-                value = "00:00:00",
+                value = serverStats.uptimeFormatted,
                 subValue = "",
                 modifier = Modifier.weight(1f)
             )
@@ -1132,7 +1324,6 @@ fun StatCard(
 fun ModernConsolePanel(
     logs: List<String>,
     serverRunning: Boolean,
-    onClearClick: () -> Unit,
     onSendCommand: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -1176,13 +1367,7 @@ fun ModernConsolePanel(
                     }
                 }
                 
-                FilledTonalButton(
-                    onClick = onClearClick,
-                    shape = RoundedCornerShape(10.dp),
-                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)
-                ) {
-                    Text("清空", fontSize = 13.sp)
-                }
+                // 清空按钮已移除；日志由 ServerRunner 管理清理
             }
             
             HorizontalDivider(

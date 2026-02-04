@@ -22,7 +22,12 @@ data class ServerConfig(
         val command = mutableListOf<String>()
         
         // Java 路径
-        command.add(javaPath)
+        // Java 路径 - 如果包含空格需要用引号包裹
+        if (javaPath.contains(" ")) {
+            command.add("\"$javaPath\"")
+        } else {
+            command.add(javaPath)
+        }
         
         // 内存参数
         command.add("-Xms${minMemory}M")
