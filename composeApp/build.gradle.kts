@@ -47,6 +47,9 @@ compose.desktop {
             packageName = "Cos Minecraft Server Launcher"
             packageVersion = "1.0.2"
             
+            // Include necessary JVM modules for ManagementFactory and system monitoring
+            modules("java.management", "jdk.management")
+            
             // Application description
             description = "A modern Minecraft server launcher built with Compose Multiplatform"
             copyright = "© 2026 Cos Minecraft Server Launcher"
