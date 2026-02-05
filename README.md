@@ -12,7 +12,7 @@ Cos Minecraft Server Launcher (CMSL) 是一款跨平台桌面应用程序，旨�
 - **多服务器支持**：同时管理多个服务器实例
 - **一键启停**：通过可视化状态指示器快速控制服务器
 - **服务器配置**：图形化界面编辑服务器属性和配置
-- **实时控制台**：查看支持 ANSI 颜色的服务器日志，直接发送命令
+- **实时控制台**：查看服务器日志，直接发送命令
 
 ### 服务器核心下载
 - **多源支持**：从 Paper、Purpur、Folia 等热门服务器核心下载
@@ -57,15 +57,13 @@ Cos Minecraft Server Launcher (CMSL) 是一款跨平台桌面应用程序，旨�
 ## 系统要求
 
 ### 最低要求
-- **操作系统**：Windows 10/11、macOS 10.14+ 或 Linux (64位)
-- **内存**：4 GB（推荐 8 GB）
-- **Java**：Java 17 或更高版本（Minecraft 1.18+ 必需）
-- **磁盘空间**：2 GB 可用空间（服务器需要额外空间）
+- **操作系统**：是个Windows就行，要64位
+- **内存**：你觉得够用就行
+- **磁盘空间**：够你放服务端和启动器就行
 
 ### 推荐配置
-- **操作系统**：Windows 11 或 macOS 12+
+- **操作系统**：Windows 10
 - **内存**：8 GB 或更多
-- **Java**：Java 21（最新 LTS 版本）
 - **磁盘空间**：10 GB 或更多
 
 ## 安装指南
@@ -78,16 +76,6 @@ Cos Minecraft Server Launcher (CMSL) 是一款跨平台桌面应用程序，旨�
 2. 运行安装程序并按照设置向导操作
 3. 从开始菜单或桌面快捷方式启动 CMSL
 
-### macOS
-1. 下载 `.dmg` 文件
-2. 打开 DMG 并将 CMSL 拖到应用程序文件夹
-3. 从应用程序启动 CMSL
-
-### Linux
-1. 下载 `.deb` 或 `.rpm` 包（其他发行版使用 `.tar.gz`）
-2. 使用包管理器安装
-3. 从应用程序菜单启动 CMSL
-
 ## 快速入门
 
 ### 创建您的第一个服务器
@@ -98,13 +86,9 @@ Cos Minecraft Server Launcher (CMSL) 是一款跨平台桌面应用程序，旨�
 2. **选择服务器核心**
    - 从 Paper、Purpur、Folia 或其他可用服务器核心中选择
    - 选择您想要的 Minecraft 版本
-
-3. **配置服务器**
-   - 为服务器输入名称
-   - 选择安装位置（默认为用户目录）
    - 点击"下载"开始
 
-4. **启动服务器**
+3. **启动服务器**
    - 返回"首页"选项卡
    - 从列表中选择新创建的服务器
    - 点击"启动服务器"来运行
@@ -137,8 +121,8 @@ Cos Minecraft Server Launcher (CMSL) 是一款跨平台桌面应用程序，旨�
 
 3. **安装插件**
    - 点击插件查看详情
-   - 选择与服务器兼容的版本
    - 选择目标服务器
+   - 选择与服务器兼容的版本
    - 点击"安装"
 
 ## 配置说明
@@ -154,14 +138,13 @@ Cos Minecraft Server Launcher (CMSL) 是一款跨平台桌面应用程序，旨�
 #### 高级设置
 - **自定义 JVM 参数**：额外的 Java 标志
 - **服务器参数**：Minecraft 服务器参数
-- **无 GUI 模式**：禁用服务器 GUI（默认启用以更好集成）
+- **无 GUI 模式**：禁用服务器 GUI（部分服务端会有一个UI窗口）
 - **自动重启**：崩溃时自动重启
 
 ### 应用程序设置
 
 #### 文件位置
-- **服务器目录**：`%UserProfile%\CosMinecraftServerLauncher\mcserver\`（Windows）
-- **服务器目录**：`~/CosMinecraftServerLauncher/mcserver/`（macOS/Linux）
+- **服务器目录**：`%UserProfile%\CosMinecraftServerLauncher\mcserver\`
 - **配置文件**：与服务器文件一起存储
 
 ## 项目结构
@@ -182,74 +165,6 @@ Cos-Minecraft-Server-Launcher/
 ├── settings.gradle.kts       # 项目设置
 └── LICENSE                   # 项目许可证
 ```
-
-## 从源码构建
-
-### 前置要求
-- JDK 17 或更高版本
-- Gradle 8.0 或更高版本（通过 wrapper 包含）
-
-### 构建步骤
-
-1. **克隆仓库**
-   ```bash
-   git clone https://github.com/cyf112233/Cos-Minecraft-Server-Launcher.git
-   cd Cos-Minecraft-Server-Launcher
-   ```
-
-2. **构建项目**
-   ```bash
-   ./gradlew build
-   ```
-
-3. **运行应用程序**
-   ```bash
-   ./gradlew run
-   ```
-
-4. **创建分发包**
-   ```bash
-   ./gradlew packageDistributionForCurrentOS
-   ```
-
-## 贡献指南
-
-欢迎贡献！请遵循以下指南：
-
-### 如何贡献
-
-1. **Fork 仓库**
-   - 在 GitHub 上创建此仓库的 fork
-
-2. **创建功能分支**
-   ```bash
-   git checkout -b feature/your-feature-name
-   ```
-
-3. **进行更改**
-   - 编写干净、文档良好的代码
-   - 遵循 Kotlin 编码规范
-   - 为新功能添加测试
-
-4. **提交更改**
-   ```bash
-   git commit -m "Add: 简要描述更改"
-   ```
-
-5. **推送到您的 Fork**
-   ```bash
-   git push origin feature/your-feature-name
-   ```
-
-6. **提交 Pull Request**
-   - 打开带有清晰描述的 pull request
-   - 引用任何相关问题
-
-### 代码规范
-- 遵循 Kotlin 官方风格指南
-- 使用有意义的变量和函数名
-- 为复杂逻辑编写注释
-- 保持函数简洁专注
 
 ## 故障排除
 
@@ -280,13 +195,13 @@ Cos-Minecraft-Server-Launcher/
 ## 常见问题
 
 **问：CMSL 支持 Forge 或 Fabric 等模组服务器吗？**  
-答：目前 CMSL 专注于基于插件的服务器（Paper、Purpur、Folia）。模组服务器支持计划在未来版本中推出。
+答：CMSL 专注于基于插件的服务器（Paper、Purpur、Folia）。
 
 **问：我可以将现有服务器导入 CMSL 吗？**  
 答：可以，您可以手动将服务器文件放在 CMSL 服务器目录中，它们会自动被检测到。
 
 **问：CMSL 是免费使用的吗？**  
-答：是的，CMSL 在 MIT 许可证下完全免费且开源。
+答：是的，CMSL 在 GPL V3 许可证下完全免费且开源。
 
 **问：如何更新我的服务器核心？**  
 答：通过下载选项卡下载新版本，并替换服务器目录中的旧服务器 JAR 文件。
@@ -296,37 +211,7 @@ Cos-Minecraft-Server-Launcher/
 
 ## 开源许可
 
-本项目采用 MIT 许可证 - 详见 [LICENSE](LICENSE) 文件。
+本项目采用 GPL V3 许可证 - 详见 [LICENSE](LICENSE) 文件。
 
-## 致谢
-
-### 第三方 API
-- **PaperMC API**：服务器核心下载和版本信息
-- **Modrinth API**：插件市场和元数据
-
-### 技术框架
-- **Compose Multiplatform**：UI 框架
-- **Kotlin Coroutines**：异步编程
-- **kotlinx.serialization**：JSON 解析
-- **Ktor**：HTTP 客户端
-
-### 社区
-感谢所有通过反馈、错误报告和功能建议帮助改进 CMSL 的贡献者和用户。
-
-## 支持
-
-### 问题报告
-- GitHub Issues：[报告 Bug](https://github.com/cyf112233/Cos-Minecraft-Server-Launcher/issues)
-- 功能请求：[请求功能](https://github.com/cyf112233/Cos-Minecraft-Server-Launcher/issues)
-
-### 文档
-- 更多文档和指南可在 [Wiki](https://github.com/cyf112233/Cos-Minecraft-Server-Launcher/wiki) 中找到
-
-### 社区
-- 讨论：[GitHub Discussions](https://github.com/cyf112233/Cos-Minecraft-Server-Launcher/discussions)
-
----
-
-**使用 Kotlin 和 Compose Multiplatform 构建**
 
 Copyright (c) 2026 Cos Minecraft Server Launcher Project
