@@ -45,7 +45,7 @@ compose.desktop {
         nativeDistributions {
             targetFormats(TargetFormat.Dmg, TargetFormat.Msi, TargetFormat.Deb)
             packageName = "Cos Minecraft Server Launcher"
-            packageVersion = "1.0.1"
+            packageVersion = "1.0.2"
             
             // Application description
             description = "A modern Minecraft server launcher built with Compose Multiplatform"
@@ -65,7 +65,7 @@ compose.desktop {
                 // Install for all users
                 perUserInstall = false
                 // Unique identifier for upgrades
-                upgradeUuid = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                upgradeUuid = "c315940a-d2be-4482-bad2-73d63bfe48bf"
             }
             
             // macOS specific configuration

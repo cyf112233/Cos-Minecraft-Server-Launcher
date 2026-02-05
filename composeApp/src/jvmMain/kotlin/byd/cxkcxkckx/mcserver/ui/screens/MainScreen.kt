@@ -116,7 +116,7 @@ object IconLoader {
 fun MainScreen() {
     
     var selectedTab by remember { mutableStateOf(0) }
-    val tabs = listOf("首页", "下载", "市场", "更多")
+    val tabs = listOf("首页", "下载", "市场", "关于")
     
     // Hoist all state to MainScreen level so it survives tab switches
     var servers by remember { mutableStateOf<List<ServerInfo>>(emptyList()) }
@@ -1953,6 +1953,18 @@ fun StatusIndicator(state: ServerState) {
 
 @Composable
 fun ModernStatsGrid(serverStats: ServerStats) {
+    // 获取系统指标
+    val systemMetrics = remember { ServerStateManager.getSystemMetrics() }
+    var metrics by remember { mutableStateOf(systemMetrics) }
+    
+    // 定期更新系统指标
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(2000) // 每2秒更新一次
+            metrics = ServerStateManager.getSystemMetrics()
+        }
+    }
+    
     Column(
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
@@ -1960,14 +1972,14 @@ fun ModernStatsGrid(serverStats: ServerStats) {
             horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             StatCard(
-                label = "在线玩家",
-                value = serverStats.onlinePlayers.toString(),
-                subValue = "/ ${serverStats.maxPlayers}",
+                label = "系统内存",
+                value = String.format("%.1f GB", metrics.systemMemoryUsedGB),
+                subValue = "/ ${String.format("%.1f", metrics.systemMemoryTotalGB)} GB",
                 modifier = Modifier.weight(1f)
             )
             StatCard(
-                label = "TPS",
-                value = String.format("%.1f", serverStats.tps),
+                label = "系统CPU",
+                value = String.format("%.1f%%", metrics.systemCpuUsage),
                 subValue = "",
                 modifier = Modifier.weight(1f)
             )
@@ -1976,9 +1988,9 @@ fun ModernStatsGrid(serverStats: ServerStats) {
             horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             StatCard(
-                label = "内存",
-                value = "${serverStats.usedMemoryMB} MB",
-                subValue = "/ ${serverStats.maxMemoryMB} MB",
+                label = "运行中服务器",
+                value = "${metrics.runningServersCount}",
+                subValue = "个",
                 modifier = Modifier.weight(1f)
             )
             StatCard(
@@ -2246,28 +2258,318 @@ fun SettingsScreen() {
 
 @Composable
 fun MoreScreen() {
-    Box(
-        modifier = Modifier.fillMaxSize().padding(24.dp),
-        contentAlignment = Alignment.Center
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(32.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(24.dp)
     ) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+        Spacer(modifier = Modifier.height(16.dp))
+        
+        // Logo and Title
+        Card(
+            modifier = Modifier.fillMaxWidth(0.8f),
+            shape = RoundedCornerShape(24.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.primaryContainer
+            ),
+            elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(32.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                // Icon
+                Box(
+                    modifier = Modifier
+                        .size(96.dp)
+                        .clip(RoundedCornerShape(24.dp))
+                        .background(
+                            brush = androidx.compose.ui.graphics.Brush.linearGradient(
+                                colors = listOf(
+                                    MaterialTheme.colorScheme.primary,
+                                    MaterialTheme.colorScheme.tertiary
+                                )
+                            )
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "CMSL",
+                        fontSize = 32.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = MaterialTheme.colorScheme.onPrimary
+                    )
+                }
+                
+                Text(
+                    text = "Cos Minecraft Server Launcher",
+                    fontSize = 24.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                )
+                
+                Text(
+                    text = "Version 1.0.0",
+                    fontSize = 14.sp,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f)
+                )
+                
+                HorizontalDivider(
+                    modifier = Modifier.padding(vertical = 8.dp),
+                    color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.3f)
+                )
+                
+                Text(
+                    text = "一款简单易用的 Minecraft 服务器管理工具",
+                    fontSize = 16.sp,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f),
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                )
+            }
+        }
+        
+        // Features Section
+        Card(
+            modifier = Modifier.fillMaxWidth(0.8f),
+            shape = RoundedCornerShape(20.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surfaceVariant
+            )
+        ) {
+            Column(
+                modifier = Modifier.padding(24.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                Text(
+                    text = "✨ 主要特性",
+                    fontSize = 20.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                
+                FeatureItem(
+                    icon = Icons.Default.Download,
+                    title = "一键下载",
+                    description = "支持 Paper、Purpur、Folia 等多种服务端核心"
+                )
+                
+                FeatureItem(
+                    icon = Icons.Default.Rocket,
+                    title = "快速启动",
+                    description = "图形化配置服务器参数，轻松启动和管理服务器"
+                )
+                
+                FeatureItem(
+                    icon = Icons.Default.Extension,
+                    title = "插件市场",
+                    description = "集成 Modrinth 插件市场，方便安装和管理插件"
+                )
+                
+                FeatureItem(
+                    icon = Icons.Default.Settings,
+                    title = "配置编辑",
+                    description = "可视化编辑 server.properties 和 spigot.yml 配置"
+                )
+                
+                FeatureItem(
+                    icon = Icons.Default.Terminal,
+                    title = "实时控制台",
+                    description = "查看服务器日志，发送命令，监控服务器状态"
+                )
+            }
+        }
+        
+        // Technology Section
+        Card(
+            modifier = Modifier.fillMaxWidth(0.8f),
+            shape = RoundedCornerShape(20.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.secondaryContainer
+            )
+        ) {
+            Column(
+                modifier = Modifier.padding(24.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text(
+                    text = "🛠️ 技术栈",
+                    fontSize = 20.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer
+                )
+                
+                TechItem("Kotlin Multiplatform")
+                TechItem("Compose Multiplatform")
+                TechItem("Coroutines")
+                TechItem("Material Design 3")
+            }
+        }
+        
+        // Links Section
+        Card(
+            modifier = Modifier.fillMaxWidth(0.8f),
+            shape = RoundedCornerShape(20.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.tertiaryContainer
+            )
+        ) {
+            Column(
+                modifier = Modifier.padding(24.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                Text(
+                    text = "🔗 相关链接",
+                    fontSize = 20.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onTertiaryContainer
+                )
+                
+                LinkItem(
+                    icon = Icons.Default.Code,
+                    title = "GitHub 仓库",
+                    url = "https://github.com/cyf112233/Cos-Minecraft-Server-Launcher"
+                )
+                
+                LinkItem(
+                    icon = Icons.Default.Description,
+                    title = "使用文档",
+                    url = "https://github.com/cyf112233/Cos-Minecraft-Server-Launcher#readme"
+                )
+                
+                LinkItem(
+                    icon = Icons.Default.BugReport,
+                    title = "问题反馈",
+                    url = "https://github.com/cyf112233/Cos-Minecraft-Server-Launcher/issues"
+                )
+            }
+        }
+        
+        // Copyright
+        Text(
+            text = "© 2026 Cos Minecraft Server Launcher",
+            fontSize = 12.sp,
+            color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.5f),
+            modifier = Modifier.padding(top = 16.dp)
+        )
+        
+        Text(
+            text = "Made with ❤️ using Compose Multiplatform",
+            fontSize = 11.sp,
+            color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.4f)
+        )
+        
+        Spacer(modifier = Modifier.height(16.dp))
+    }
+}
+
+@Composable
+fun FeatureItem(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    title: String,
+    description: String
+) {
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        verticalAlignment = Alignment.Top
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = title,
+            modifier = Modifier.size(24.dp),
+            tint = MaterialTheme.colorScheme.primary
+        )
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(
+                text = title,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Text(
+                text = description,
+                fontSize = 13.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                lineHeight = 18.sp
+            )
+        }
+    }
+}
+
+@Composable
+fun TechItem(name: String) {
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .size(8.dp)
+                .clip(CircleShape)
+                .background(MaterialTheme.colorScheme.primary)
+        )
+        Text(
+            text = name,
+            fontSize = 14.sp,
+            color = MaterialTheme.colorScheme.onSecondaryContainer
+        )
+    }
+}
+
+@Composable
+fun LinkItem(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    title: String,
+    url: String
+) {
+    Surface(
+        onClick = {
+            if (url.startsWith("http")) {
+                try {
+                    java.awt.Desktop.getDesktop().browse(java.net.URI(url))
+                } catch (e: Exception) {
+                    println("Failed to open URL: ${e.message}")
+                }
+            }
+        },
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.5f),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(
+            modifier = Modifier.padding(12.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
             Icon(
-                imageVector = Icons.Default.MoreHoriz,
-                contentDescription = "更多",
-                modifier = Modifier.size(64.dp),
+                imageVector = icon,
+                contentDescription = title,
+                modifier = Modifier.size(20.dp),
                 tint = MaterialTheme.colorScheme.primary
             )
-            Text(
-                text = "更多功能",
-                style = MaterialTheme.typography.headlineMedium,
-                fontWeight = FontWeight.Bold
-            )
-            Text(
-                text = "即将推出",
-                color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.6f)
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = title,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onTertiaryContainer
+                )
+                Text(
+                    text = url,
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.7f)
+                )
+            }
+            Icon(
+                imageVector = Icons.Default.ChevronRight,
+                contentDescription = "打开",
+                modifier = Modifier.size(20.dp),
+                tint = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.5f)
             )
         }
     }

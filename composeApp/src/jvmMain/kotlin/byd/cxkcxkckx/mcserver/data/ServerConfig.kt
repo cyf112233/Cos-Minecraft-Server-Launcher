@@ -9,7 +9,7 @@ data class ServerConfig(
     val maxMemory: Int = 2048, // MB
     val minMemory: Int = 1024, // MB
     val safeMode: Boolean = false,
-    val noGui: Boolean = true,
+    val noGui: Boolean = false, // 默认启用 GUI
     val autoRestart: Boolean = false,
     val customJvmArgs: String = "",
     val customServerArgs: String = "",

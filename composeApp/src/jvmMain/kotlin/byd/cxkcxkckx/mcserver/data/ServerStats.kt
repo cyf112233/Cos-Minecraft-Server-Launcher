@@ -9,7 +9,11 @@ data class ServerStats(
     val tps: Double = 20.0,
     val usedMemoryMB: Long = 0,
     val maxMemoryMB: Long = 0,
-    val uptimeSeconds: Long = 0
+    val uptimeSeconds: Long = 0,
+    val systemMemoryUsedMB: Long = 0,
+    val systemMemoryTotalMB: Long = 0,
+    val systemCpuUsage: Double = 0.0,
+    val runningServersCount: Int = 0
 ) {
     val uptimeFormatted: String
         get() {
@@ -21,4 +25,7 @@ data class ServerStats(
     
     val memoryUsagePercent: Float
         get() = if (maxMemoryMB > 0) (usedMemoryMB.toFloat() / maxMemoryMB) else 0f
+    
+    val systemMemoryUsagePercent: Float
+        get() = if (systemMemoryTotalMB > 0) (systemMemoryUsedMB.toFloat() / systemMemoryTotalMB) else 0f
 }

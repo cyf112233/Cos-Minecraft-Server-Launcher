@@ -184,4 +184,59 @@ object ServerStateManager {
             .groupBy { it.state }
             .mapValues { it.value.size }
     }
+    
+    /**
+     * Get system metrics (memory and CPU usage)
+     */
+    fun getSystemMetrics(): SystemMetrics {
+        val osBean = java.lang.management.ManagementFactory.getOperatingSystemMXBean()
+        
+        // Try to get system-level metrics if available
+        val (totalMemoryGB, usedMemoryGB, cpuUsage) = if (osBean is com.sun.management.OperatingSystemMXBean) {
+            // Get total physical memory
+            val totalPhysicalMemory = osBean.totalMemorySize
+            val freePhysicalMemory = osBean.freeMemorySize
+            val usedPhysicalMemory = totalPhysicalMemory - freePhysicalMemory
+            
+            // Get system CPU load (not just process)
+            val systemCpuLoad = osBean.cpuLoad * 100.0
+            
+            Triple(
+                totalPhysicalMemory.toDouble() / (1024 * 1024 * 1024),
+                usedPhysicalMemory.toDouble() / (1024 * 1024 * 1024),
+                systemCpuLoad.coerceIn(0.0, 100.0)
+            )
+        } else {
+            // Fallback to runtime memory if OS bean not available
+            val runtime = Runtime.getRuntime()
+            val totalMemory = runtime.totalMemory()
+            val freeMemory = runtime.freeMemory()
+            val usedMemory = totalMemory - freeMemory
+            
+            Triple(
+                totalMemory.toDouble() / (1024 * 1024 * 1024),
+                usedMemory.toDouble() / (1024 * 1024 * 1024),
+                0.0
+            )
+        }
+        
+        // Running servers count
+        val runningCount = _serverStates.value.values.count { 
+            it.state == ServerState.RUNNING 
+        }
+        
+        return SystemMetrics(
+            systemMemoryUsedGB = usedMemoryGB,
+            systemMemoryTotalGB = totalMemoryGB,
+            systemCpuUsage = cpuUsage,
+            runningServersCount = runningCount
+        )
+    }
+    
+    data class SystemMetrics(
+        val systemMemoryUsedGB: Double,
+        val systemMemoryTotalGB: Double,
+        val systemCpuUsage: Double,
+        val runningServersCount: Int
+    )
 }

@@ -27,6 +27,10 @@ import byd.cxkcxkckx.mcserver.utils.JavaDetector
 import byd.cxkcxkckx.mcserver.utils.PluginManager
 import byd.cxkcxkckx.mcserver.utils.ServerRunner
 import byd.cxkcxkckx.mcserver.utils.JavaInstallation
+import byd.cxkcxkckx.mcserver.utils.ServerPropertiesManager
+import byd.cxkcxkckx.mcserver.utils.SpigotYmlManager
+import byd.cxkcxkckx.mcserver.utils.PropertyDefinition
+import byd.cxkcxkckx.mcserver.utils.PropertyType
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
@@ -1232,52 +1236,377 @@ fun ConfigFilesContent(
     serverInfo: ServerInfo,
     onBack: () -> Unit
 ) {
+    var serverProperties by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
+    var spigotProperties by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
+    var hasServerProperties by remember { mutableStateOf(false) }
+    var hasSpigotYml by remember { mutableStateOf(false) }
+    var showSaveSuccess by remember { mutableStateOf(false) }
+    var errorMessage by remember { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
+    
+    // 加载配置文件
+    LaunchedEffect(Unit) {
+        hasServerProperties = ServerPropertiesManager.exists(serverInfo.path)
+        hasSpigotYml = SpigotYmlManager.exists(serverInfo.path)
+        
+        if (hasServerProperties) {
+            serverProperties = ServerPropertiesManager.load(serverInfo.path)
+        }
+        if (hasSpigotYml) {
+            spigotProperties = SpigotYmlManager.load(serverInfo.path)
+        }
+    }
+    
+    // 保存配置
+    fun saveConfig() {
+        scope.launch {
+            try {
+                var success = true
+                
+                if (hasServerProperties) {
+                    success = success && ServerPropertiesManager.save(serverInfo.path, serverProperties)
+                }
+                if (hasSpigotYml) {
+                    success = success && SpigotYmlManager.save(serverInfo.path, spigotProperties)
+                }
+                
+                if (success) {
+                    showSaveSuccess = true
+                } else {
+                    errorMessage = "保存失败，请检查文件权限"
+                }
+            } catch (e: Exception) {
+                errorMessage = "保存失败: ${e.message}"
+            }
+        }
+    }
+    
+    // 错误对话框
+    errorMessage?.let { msg ->
+        AlertDialog(
+            onDismissRequest = { errorMessage = null },
+            title = { Text("错误") },
+            text = { Text(msg) },
+            confirmButton = {
+                Button(onClick = { errorMessage = null }) {
+                    Text("确定")
+                }
+            }
+        )
+    }
+    
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .verticalScroll(rememberScrollState())
             .padding(24.dp),
         verticalArrangement = Arrangement.spacedBy(20.dp)
     ) {
+        // 顶部工具栏
         Row(
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            IconButton(onClick = onBack) {
-                Icon(
-                    imageVector = Icons.Default.ArrowBack,
-                    contentDescription = "返回"
-                )
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconButton(onClick = onBack) {
+                    Icon(
+                        imageVector = Icons.Default.ArrowBack,
+                        contentDescription = "返回"
+                    )
+                }
+                Column {
+                    Text(
+                        text = "配置文件编辑",
+                        fontSize = 24.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = "编辑常用配置项",
+                        fontSize = 14.sp,
+                        color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.6f)
+                    )
+                }
             }
-            Text(
-                text = "配置文件编辑",
-                fontSize = 24.sp,
-                fontWeight = FontWeight.Bold
-            )
+            
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                // 打开文件夹按钮
+                OutlinedButton(
+                    onClick = {
+                        scope.launch {
+                            try {
+                                val serverDir = java.io.File(serverInfo.path)
+                                if (serverDir.exists()) {
+                                    val os = System.getProperty("os.name").lowercase()
+                                    val command = when {
+                                        os.contains("win") -> "explorer \"${serverDir.absolutePath}\""
+                                        os.contains("mac") -> "open \"${serverDir.absolutePath}\""
+                                        else -> "xdg-open \"${serverDir.absolutePath}\""
+                                    }
+                                    Runtime.getRuntime().exec(command)
+                                } else {
+                                    errorMessage = "服务器目录不存在"
+                                }
+                            } catch (e: Exception) {
+                                errorMessage = "打开文件夹失败: ${e.message}"
+                            }
+                        }
+                    },
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.FolderOpen,
+                        contentDescription = "打开文件夹",
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("打开文件夹")
+                }
+                
+                // 保存配置按钮
+                Button(
+                    onClick = { saveConfig() },
+                    shape = RoundedCornerShape(12.dp),
+                    enabled = hasServerProperties || hasSpigotYml
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Save,
+                        contentDescription = "保存",
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("保存配置")
+                }
+            }
         }
         
-        Box(
-            modifier = Modifier.fillMaxSize(),
-            contentAlignment = Alignment.Center
+        // 成功提示
+        AnimatedVisibility(
+            visible = showSaveSuccess,
+            enter = fadeIn() + expandVertically(),
+            exit = fadeOut() + shrinkVertically()
         ) {
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(16.dp)
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.primaryContainer
+                ),
+                shape = RoundedCornerShape(12.dp)
             ) {
-                Icon(
-                    imageVector = Icons.Default.Description,
-                    contentDescription = "配置文件",
-                    modifier = Modifier.size(64.dp),
-                    tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)
-                )
+                Row(
+                    modifier = Modifier.padding(16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.CheckCircle,
+                        contentDescription = "成功",
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                    Text(
+                        text = "配置已保存，重启服务器后生效",
+                        color = MaterialTheme.colorScheme.onPrimaryContainer
+                    )
+                }
+            }
+            
+            LaunchedEffect(Unit) {
+                kotlinx.coroutines.delay(3000)
+                showSaveSuccess = false
+            }
+        }
+        
+        // 如果没有配置文件
+        if (!hasServerProperties && !hasSpigotYml) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.errorContainer
+                ),
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                Column(
+                    modifier = Modifier.padding(24.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(16.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Warning,
+                        contentDescription = "警告",
+                        modifier = Modifier.size(48.dp),
+                        tint = MaterialTheme.colorScheme.error
+                    )
+                    Text(
+                        text = "未找到配置文件",
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onErrorContainer
+                    )
+                    Text(
+                        text = "请先启动一次服务器以生成配置文件",
+                        color = MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.8f),
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                    )
+                }
+            }
+        }
+        
+        // server.properties 配置
+        if (hasServerProperties) {
+            ConfigCard(
+                title = "server.properties",
+                icon = Icons.Default.Description
+            ) {
+                Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                    ServerPropertiesManager.getCommonProperties().forEach { prop ->
+                        PropertyEditor(
+                            definition = prop,
+                            value = serverProperties[prop.key] ?: prop.defaultValue,
+                            onValueChange = { newValue ->
+                                serverProperties = serverProperties.toMutableMap().apply {
+                                    put(prop.key, newValue)
+                                }
+                            }
+                        )
+                        
+                        if (prop != ServerPropertiesManager.getCommonProperties().last()) {
+                            Divider(
+                                modifier = Modifier.padding(vertical = 4.dp),
+                                color = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        
+        // spigot.yml 配置
+        if (hasSpigotYml) {
+            ConfigCard(
+                title = "spigot.yml",
+                icon = Icons.Default.Settings
+            ) {
+                Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                    SpigotYmlManager.getCommonProperties().forEach { prop ->
+                        PropertyEditor(
+                            definition = prop,
+                            value = spigotProperties[prop.key] ?: prop.defaultValue,
+                            onValueChange = { newValue ->
+                                spigotProperties = spigotProperties.toMutableMap().apply {
+                                    put(prop.key, newValue)
+                                }
+                            }
+                        )
+                        
+                        if (prop != SpigotYmlManager.getCommonProperties().last()) {
+                            Divider(
+                                modifier = Modifier.padding(vertical = 4.dp),
+                                color = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun PropertyEditor(
+    definition: PropertyDefinition,
+    value: String,
+    onValueChange: (String) -> Unit
+) {
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = "配置文件编辑功能",
-                    fontSize = 18.sp,
+                    text = definition.displayName,
+                    fontSize = 14.sp,
                     fontWeight = FontWeight.SemiBold
                 )
                 Text(
-                    text = "即将推出",
-                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.6f)
+                    text = definition.description,
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
                 )
+            }
+            
+            when (definition.type) {
+                PropertyType.BOOLEAN -> {
+                    Switch(
+                        checked = value.equals("true", ignoreCase = true),
+                        onCheckedChange = { checked ->
+                            onValueChange(checked.toString())
+                        }
+                    )
+                }
+                PropertyType.SELECT -> {
+                    var expanded by remember { mutableStateOf(false) }
+                    
+                    Box {
+                        OutlinedButton(
+                            onClick = { expanded = true },
+                            modifier = Modifier.widthIn(min = 120.dp)
+                        ) {
+                            Text(value, fontSize = 13.sp)
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Icon(
+                                imageVector = Icons.Default.ArrowDropDown,
+                                contentDescription = "选择",
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                        
+                        DropdownMenu(
+                            expanded = expanded,
+                            onDismissRequest = { expanded = false }
+                        ) {
+                            definition.options.forEach { option ->
+                                DropdownMenuItem(
+                                    text = { Text(option) },
+                                    onClick = {
+                                        onValueChange(option)
+                                        expanded = false
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+                PropertyType.NUMBER -> {
+                    OutlinedTextField(
+                        value = value,
+                        onValueChange = { newValue ->
+                            // 只允许数字
+                            if (newValue.isEmpty() || newValue.all { it.isDigit() || it == '-' }) {
+                                onValueChange(newValue)
+                            }
+                        },
+                        modifier = Modifier.width(120.dp),
+                        singleLine = true,
+                        textStyle = androidx.compose.ui.text.TextStyle(fontSize = 14.sp)
+                    )
+                }
+                PropertyType.TEXT -> {
+                    OutlinedTextField(
+                        value = value,
+                        onValueChange = onValueChange,
+                        modifier = Modifier.widthIn(min = 200.dp, max = 400.dp),
+                        singleLine = true,
+                        textStyle = androidx.compose.ui.text.TextStyle(fontSize = 14.sp)
+                    )
+                }
             }
         }
     }
