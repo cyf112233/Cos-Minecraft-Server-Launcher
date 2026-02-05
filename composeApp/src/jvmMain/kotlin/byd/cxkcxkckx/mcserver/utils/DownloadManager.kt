@@ -17,11 +17,11 @@ object DownloadManager {
     val tasks: StateFlow<List<DownloadTask>> = _tasks.asStateFlow()
     
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-    // 使用当前工作目录下的 mcserver 文件夹
-    private val baseDir = File(System.getProperty("user.dir"), "mcserver")
+    // 使用用户目录下的 mcserver 文件夹
+    private val baseDir: File
+        get() = PathManager.getDownloadDirectory()
     
     init {
-        baseDir.mkdirs()
         println("=== DownloadManager 初始化 ===")
         println("下载目录: ${baseDir.absolutePath}")
         println("目录是否存在: ${baseDir.exists()}")

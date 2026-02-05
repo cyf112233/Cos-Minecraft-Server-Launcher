@@ -4,21 +4,11 @@ import byd.cxkcxkckx.mcserver.data.ServerInfo
 import java.io.File
 
 object ServerManager {
-    private const val SERVERS_DIR = "mcserver"
-    
     /**
-     * 获取或创建 mcserver 目录
+     * 获取或创建服务器目录（使用用户目录）
      */
     fun getServersDirectory(): File {
-        val currentDir = System.getProperty("user.dir")
-        val serversDir = File(currentDir, SERVERS_DIR)
-        
-        if (!serversDir.exists()) {
-            serversDir.mkdirs()
-            println("创建服务器目录: ${serversDir.absolutePath}")
-        }
-        
-        return serversDir
+        return PathManager.getServersDirectory()
     }
     
     /**

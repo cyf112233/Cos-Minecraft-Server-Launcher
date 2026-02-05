@@ -1529,11 +1529,15 @@ fun ServerSelector(
             }
             
             if (servers.isEmpty()) {
-                Text(
-                    text = "暂无服务器，请在 mcserver 文件夹中添加服务器",
-                    fontSize = 13.sp,
-                    color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f)
-                )
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(
+                        text = "暂无服务器，请通过下载界面添加服务器",
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f)
+                    )
+                }
             } else {
                 Column(
                     verticalArrangement = Arrangement.spacedBy(8.dp)
